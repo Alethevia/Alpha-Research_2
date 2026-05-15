@@ -14,9 +14,6 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import warnings
@@ -28,6 +25,7 @@ from extra_patterns import detect_extra_patterns
 from historical_stats import SIGNAL_STATS, BASELINE_10D, format_freq_text, stability_badge
 from new_indicators import compute_new_indicators
 from confluence import compute_confluence_summary
+from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
 
 st.set_page_config(
     page_title="技术指标频率分析",
@@ -676,61 +674,63 @@ with tab1:
                         ned_str = str(ned)
                     st.info(f"📅 下次财报日期: {ned_str}")
 
-                # === 图表 ===
-                st.markdown("## 📈 价格图表")
-                fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True,
-                                            gridspec_kw={"height_ratios": [3, 1, 1, 1]})
-                ax = axes[0]
-                ax.plot(disp["timestamp"], disp["close"], color="black", lw=1.2, label="Close")
-                if "sma200" in disp.columns:
-                    ax.plot(disp["timestamp"], disp["sma200"], color="purple", lw=1, alpha=0.7, label="SMA200")
-                if "sma50" in disp.columns:
-                    ax.plot(disp["timestamp"], disp["sma50"], color="orange", lw=0.8, alpha=0.7, label="SMA50")
-                gc_dates = disp[disp["macd_gc"] == True] if "macd_gc" in disp.columns else disp.iloc[0:0]
-                dc_dates = disp[disp["macd_dc"] == True] if "macd_dc" in disp.columns else disp.iloc[0:0]
-                if not gc_dates.empty:
-                    ax.scatter(gc_dates["timestamp"], gc_dates["close"], color="green", s=80, marker="^", zorder=5, label="MACD GC", edgecolors="darkgreen")
-                if not dc_dates.empty:
-                    ax.scatter(dc_dates["timestamp"], dc_dates["close"], color="red", s=80, marker="v", zorder=5, label="MACD DC", edgecolors="darkred")
-                db_dates = disp[disp["pat_double_bottom"] == True] if "pat_double_bottom" in disp.columns else disp.iloc[0:0]
-                dt_dates = disp[disp["pat_double_top"] == True] if "pat_double_top" in disp.columns else disp.iloc[0:0]
-                if not db_dates.empty:
-                    ax.scatter(db_dates["timestamp"], db_dates["close"], color="blue", s=120, marker="D", zorder=5, label="Double Bottom", edgecolors="darkblue")
-                if not dt_dates.empty:
-                    ax.scatter(dt_dates["timestamp"], dt_dates["close"], color="darkred", s=120, marker="X", zorder=5, label="Double Top", edgecolors="black")
-                ax.set_ylabel("Price ($)")
-                ax.set_title(f"{sym} - Price + SMAs + Pattern Markers")
-                ax.legend(loc="upper left", fontsize=7)
-                ax.grid(alpha=0.3)
+                # === 图表 (Plotly 交互式) ===
+                st.markdown("## 📈 交互式价格图表")
+                st.caption(
+                    "💡 拖动可平移 / 滚轮可缩放 / 双击复原 / 点击图例可隐藏/显示线条。"
+                    "选择叠加项和副图后点 '重绘图表' 应用。"
+                )
 
-                ax = axes[1]
-                if "macd_hist" in disp.columns:
-                    colors = ["g" if pd.notna(h) and h > 0 else ("r" if pd.notna(h) else "lightgray")
-                              for h in disp["macd_hist"]]
-                    ax.bar(disp["timestamp"], disp["macd_hist"], color=colors, alpha=0.6, width=0.7)
-                    ax.axhline(0, color="black", lw=0.5)
-                ax.set_ylabel("MACD Hist")
-                ax.grid(alpha=0.3)
+                with st.expander("⚙️ 图表设置 (Chart Settings)", expanded=True):
+                    cc1, cc2, cc3, cc4 = st.columns(4)
+                    with cc1:
+                        st.markdown("**主图叠加 (Main Overlays)**")
+                        ov_sma50 = st.checkbox("SMA50", value=True, key="t1_ov_sma50")
+                        ov_sma200 = st.checkbox("SMA200", value=True, key="t1_ov_sma200")
+                        ov_ema20 = st.checkbox("EMA20", value=False, key="t1_ov_ema20")
+                    with cc2:
+                        st.markdown("**通道 (Bands)**")
+                        ov_bb = st.checkbox("Bollinger 20/2σ", value=False, key="t1_ov_bb")
+                        ov_kc = st.checkbox("Keltner 20/2 ATR", value=False, key="t1_ov_kc")
+                        ov_vwap = st.checkbox("VWAP(20)", value=False, key="t1_ov_vwap")
+                    with cc3:
+                        st.markdown("**趋势 (Trend)**")
+                        ov_super = st.checkbox("Supertrend", value=False, key="t1_ov_super")
+                        ov_ichi = st.checkbox("Ichimoku Cloud", value=False, key="t1_ov_ichi")
+                        ov_markers = st.checkbox("信号标记 (Signal markers)", value=True, key="t1_ov_markers")
+                    with cc4:
+                        st.markdown("**副图 (Subplots)**")
+                        sp_volume = st.checkbox("成交量 Volume", value=True, key="t1_sp_vol")
+                        sp_macd = st.checkbox("MACD", value=True, key="t1_sp_macd")
+                        sp_rsi = st.checkbox("RSI", value=True, key="t1_sp_rsi")
+                        sp_adx = st.checkbox("ADX/DMI", value=False, key="t1_sp_adx")
+                        sp_ttm = st.checkbox("TTM 动量", value=False, key="t1_sp_ttm")
 
-                ax = axes[2]
-                if "kdj_k" in disp.columns:
-                    ax.plot(disp["timestamp"], disp["kdj_k"], color="blue", lw=1, label="K")
-                    ax.plot(disp["timestamp"], disp["kdj_d"], color="orange", lw=1, label="D")
-                    ax.axhline(80, color="red", ls=":", alpha=0.4)
-                    ax.axhline(20, color="green", ls=":", alpha=0.4)
-                ax.set_ylabel("KDJ"); ax.set_ylim(0, 100); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+                overlays = {
+                    "sma50": ov_sma50, "sma200": ov_sma200, "ema20": ov_ema20,
+                    "bollinger": ov_bb, "keltner": ov_kc, "vwap": ov_vwap,
+                    "supertrend": ov_super, "ichimoku": ov_ichi,
+                }
+                subplots_selected = []
+                if sp_volume: subplots_selected.append("volume")
+                if sp_macd: subplots_selected.append("macd")
+                if sp_rsi: subplots_selected.append("rsi")
+                if sp_adx: subplots_selected.append("adx")
+                if sp_ttm: subplots_selected.append("ttm_momentum")
 
-                ax = axes[3]
-                if "adx" in disp.columns:
-                    ax.plot(disp["timestamp"], disp["adx"], color="purple", lw=1.2, label="ADX")
-                    ax.plot(disp["timestamp"], disp["plus_di"], color="green", lw=0.8, label="+DI")
-                    ax.plot(disp["timestamp"], disp["minus_di"], color="red", lw=0.8, label="-DI")
-                    ax.axhline(25, color="gray", ls=":", alpha=0.4)
-                ax.set_ylabel("ADX/DMI"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+                # 高度: 主图 500 + 每个副图 ~150
+                chart_height = 500 + 150 * len(subplots_selected)
 
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
+                fig = build_main_chart(
+                    disp, sym,
+                    overlays=overlays,
+                    subplots=subplots_selected,
+                    show_signal_markers=ov_markers,
+                    height=chart_height,
+                )
+                st.plotly_chart(fig, use_container_width=True, theme=None,
+                                config={"scrollZoom": True, "displaylogo": False,
+                                        "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
 
                 # === 参考表 ===
                 st.markdown("---")
