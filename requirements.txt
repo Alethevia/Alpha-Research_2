@@ -5,6 +5,11 @@ yfinance>=0.2
 scipy>=1.10
 plotly>=5.18
 
+# === Optional: alternative UI (Gradio entry point in gradio_app.py) ===
+# Streamlit is the primary UI; gradio_app.py is provided as a fall-back for
+# environments where Streamlit reruns are unstable. Remove if not using.
+gradio>=4.0
+
 # === Optional: AI probability prediction (Chronos / Kronos) ===
 # Adds ~1GB to image size. Comment these two lines to disable AI features
 # (the app will detect missing deps and hide the AI prediction section).

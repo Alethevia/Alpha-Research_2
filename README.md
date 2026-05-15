@@ -114,11 +114,49 @@ exceed transaction costs in practice.
 ## Files
 
 - `app.py` — Main Streamlit application
+- `gradio_app.py` — Optional Gradio entry point (use if Streamlit reruns are unstable on your host)
 - `extended_signals.py` — Cross signals, S/R proximity, basic candle patterns
 - `advanced_patterns.py` — Double bottom/top, head and shoulders, channels, triangles, breakouts, star patterns
 - `extra_patterns.py` — Wedges, flags, pennants, cup and handle, rounding bottom, gaps, inside/outside bars
+- `new_indicators.py` — RSI / CCI / WR / OBV / ATR / VWAP / Supertrend / Ichimoku / NXCD / TRIX / Keltner / CMF / TTM Squeeze / Heikin-Ashi
+- `confluence.py` — 6-dimension resonance scoring + auto-optimal display window
+- `plotly_charts.py` — Interactive candlestick chart (overlays, subplots, signal markers)
+- `conformal.py` — Split Conformal prediction with AR(5) baseline + adapter for any external forecaster
+- `kronos_predict.py` — Lazy wrapper for amazon/chronos-bolt-tiny (AI probability forecast)
+- `finnhub_data.py` — Free-tier Finnhub client (news, sentiment, insider transactions, analyst recs, earnings)
 - `historical_stats.py` — Embedded 21-year backtest statistics
-- `requirements.txt` — Python dependencies
+- `requirements.txt` — Python dependencies (AI + Gradio sections marked optional)
+
+## Optional integrations
+
+### Finnhub (news, sentiment, insider, analyst ratings)
+
+Get a free API key at https://finnhub.io (60 requests/min, no credit card),
+then set the env var before launching:
+
+```
+export FINNHUB_API_KEY=<your-key>
+```
+
+On HuggingFace Spaces: Settings → Variables and secrets → add `FINNHUB_API_KEY`.
+
+### AI probability forecast (Chronos-Bolt-Tiny)
+
+Adds ~1GB to the image. Already in `requirements.txt` — comment out the
+last two lines (`chronos-forecasting`, `torch`) to disable; the app
+detects the missing imports and hides the AI section.
+
+### Gradio entry point
+
+If Streamlit reruns are unstable in your hosting environment, run the
+Gradio version instead:
+
+```
+python gradio_app.py
+```
+
+On HuggingFace Spaces: change SDK to `gradio` and the entry point to
+`gradio_app.py`.
 
 ## Indicator References
 
