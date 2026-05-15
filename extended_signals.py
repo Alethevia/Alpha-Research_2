@@ -180,6 +180,9 @@ def add_sr_proximity(df, lookback=60):
     bb_std = df["close"].rolling(20).std()
     bb_upper = bb_mid + 2 * bb_std
     bb_lower = bb_mid - 2 * bb_std
+    df["bb_mid"] = bb_mid
+    df["bb_upper"] = bb_upper
+    df["bb_lower"] = bb_lower
     df["near_bb_upper"] = (bb_upper - df["close"]) / df["close"] < 0.01
     df["near_bb_lower"] = (df["close"] - bb_lower) / df["close"] < 0.01
     return df

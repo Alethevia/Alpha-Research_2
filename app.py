@@ -154,6 +154,36 @@ LABEL_ZH = {
     "trix_cross_dn": "TRIX 死叉信号线 (TRIX Cross Down)",
     "trix_positive": "TRIX > 0 上涨动量 (TRIX Positive)",
     "trix_negative": "TRIX < 0 下跌动量 (TRIX Negative)",
+
+    # === Keltner Channels ===
+    "kc_above_upper": "突破 Keltner 上轨 (Above KC Upper)",
+    "kc_below_lower": "跌破 Keltner 下轨 (Below KC Lower)",
+    "kc_inside": "Keltner 通道内 (Inside KC)",
+    "kc_break_up": "向上突破 Keltner 上轨 (KC Break Up)",
+    "kc_break_dn": "向下突破 Keltner 下轨 (KC Break Down)",
+
+    # === Chaikin Money Flow ===
+    "cmf_positive": "CMF > 0 资金流入 (CMF Positive)",
+    "cmf_negative": "CMF < 0 资金流出 (CMF Negative)",
+    "cmf_strong_bull": "CMF > 0.25 强烈买盘 (CMF Strong Bull)",
+    "cmf_strong_bear": "CMF < -0.25 强烈卖盘 (CMF Strong Bear)",
+    "cmf_cross_zero_up": "CMF 上穿 0 (CMF Cross Zero Up)",
+    "cmf_cross_zero_dn": "CMF 下穿 0 (CMF Cross Zero Down)",
+
+    # === TTM Squeeze ===
+    "squeeze_on": "TTM 挤压 (Squeeze On)",
+    "squeeze_off": "TTM 释放 (Squeeze Off)",
+    "squeeze_fired_up": "TTM 向上释放 (Squeeze Fired Up)",
+    "squeeze_fired_dn": "TTM 向下释放 (Squeeze Fired Down)",
+
+    # === Heikin-Ashi ===
+    "ha_bullish": "HA 阳线 (HA Bullish)",
+    "ha_bearish": "HA 阴线 (HA Bearish)",
+    "ha_strong_bull": "HA 强势上升 3+ 根无下影 (HA Strong Bull)",
+    "ha_strong_bear": "HA 强势下跌 3+ 根无上影 (HA Strong Bear)",
+    "ha_doji": "HA 十字星 (HA Doji)",
+    "ha_flip_bull": "HA 转涨 (HA Flip Bull)",
+    "ha_flip_bear": "HA 转跌 (HA Flip Bear)",
 }
 
 
@@ -491,6 +521,78 @@ with tab1:
                 snap_cols2[4].metric("背离信号", f"{len(divs)} 个" if divs else "无")
                 if divs:
                     st.info("🔄 检测到背离: " + ", ".join(divs))
+
+                # 第三排: 新增指标 (CMF / Keltner / TTM Squeeze / Heikin-Ashi)
+                snap_cols3 = st.columns(5)
+                cmf_val = last.get("cmf")
+                if pd.notna(cmf_val):
+                    if cmf_val > 0.25:
+                        cmf_state = "强烈买盘"
+                    elif cmf_val < -0.25:
+                        cmf_state = "强烈卖盘"
+                    elif cmf_val > 0:
+                        cmf_state = "买盘"
+                    elif cmf_val < 0:
+                        cmf_state = "卖盘"
+                    else:
+                        cmf_state = "中性"
+                    snap_cols3[0].metric("CMF (20)", f"{cmf_val:+.3f}", cmf_state, delta_color="off")
+                else:
+                    snap_cols3[0].metric("CMF (20)", "—")
+
+                # Keltner 位置
+                kc_state = "通道内"
+                if last.get("kc_above_upper"):
+                    kc_state = "上轨之上 ↑"
+                elif last.get("kc_below_lower"):
+                    kc_state = "下轨之下 ↓"
+                kc_mid_val = last.get("kc_middle")
+                snap_cols3[1].metric("Keltner",
+                                     f"${kc_mid_val:.2f}" if pd.notna(kc_mid_val) else "—",
+                                     kc_state, delta_color="off")
+
+                # TTM Squeeze
+                if last.get("squeeze_fired_up"):
+                    sq_state = "向上释放 ⚡↑"
+                elif last.get("squeeze_fired_dn"):
+                    sq_state = "向下释放 ⚡↓"
+                elif last.get("squeeze_on"):
+                    sq_state = "挤压中 (低波动)"
+                else:
+                    sq_state = "释放中"
+                sq_mom = last.get("squeeze_momentum")
+                snap_cols3[2].metric("TTM Squeeze",
+                                     f"动量 {sq_mom:+.3f}" if pd.notna(sq_mom) else "—",
+                                     sq_state, delta_color="off")
+
+                # Heikin-Ashi
+                if last.get("ha_strong_bull"):
+                    ha_state = "强势上升"
+                elif last.get("ha_strong_bear"):
+                    ha_state = "强势下跌"
+                elif last.get("ha_bullish"):
+                    ha_state = "阳线"
+                elif last.get("ha_bearish"):
+                    ha_state = "阴线"
+                else:
+                    ha_state = "—"
+                snap_cols3[3].metric("Heikin-Ashi", ha_state)
+
+                # 新指标提示
+                hints = []
+                if last.get("squeeze_on"):
+                    hints.append("TTM 挤压中")
+                if last.get("squeeze_fired_up"):
+                    hints.append("TTM 向上释放")
+                if last.get("squeeze_fired_dn"):
+                    hints.append("TTM 向下释放")
+                if last.get("kc_break_up"):
+                    hints.append("KC 上轨突破")
+                if last.get("kc_break_dn"):
+                    hints.append("KC 下轨突破")
+                snap_cols3[4].metric("特殊事件", f"{len(hints)} 个" if hints else "无")
+                if hints:
+                    st.caption("⚡ " + ", ".join(hints))
 
                 # === 当前触发的信号 ===
                 st.markdown("---")

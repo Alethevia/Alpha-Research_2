@@ -96,6 +96,12 @@ def compute_dimension_scores(row, df_full=None):
     else:
         trend_signals.append(("PSAR 空头", -1))
 
+    # Heikin-Ashi 强势趋势
+    if row.get("ha_strong_bull"):
+        trend_signals.append(("HA 强势上升 (3+ 阳无下影)", +1))
+    elif row.get("ha_strong_bear"):
+        trend_signals.append(("HA 强势下跌 (3+ 阴无上影)", -1))
+
     scores["trend"] = _summarize_signals("趋势", trend_signals)
 
     # === 2. 动量维度 ===
@@ -198,6 +204,20 @@ def compute_dimension_scores(row, df_full=None):
     elif row.get("below_vwap"):
         volume_signals.append(("价格 < VWAP (机构偏空)", -1))
 
+    # CMF (Chaikin Money Flow)
+    cmf = row.get("cmf")
+    if pd.notna(cmf):
+        if cmf > 0.25:
+            volume_signals.append(("CMF > 0.25 强烈买盘", +1))
+        elif cmf < -0.25:
+            volume_signals.append(("CMF < -0.25 强烈卖盘", -1))
+        elif cmf > 0:
+            volume_signals.append(("CMF > 0 资金流入", +1))
+        elif cmf < 0:
+            volume_signals.append(("CMF < 0 资金流出", -1))
+        else:
+            volume_signals.append(("CMF ≈ 0 (中性)", 0))
+
     scores["volume"] = _summarize_signals("成交量", volume_signals)
 
     # === 5. 波动率维度 ===
@@ -217,6 +237,20 @@ def compute_dimension_scores(row, df_full=None):
         volatility_signals.append(("ATR 异常高 (>2x 均值)", 0))
     elif row.get("atr_low_volatility"):
         volatility_signals.append(("ATR 异常低 (<0.5x 均值, 可能酝酿大波动)", 0))
+
+    # TTM Squeeze 释放: 方向不中性 (与动量同向)
+    if row.get("squeeze_fired_up"):
+        volatility_signals.append(("TTM 挤压向上释放", +1))
+    elif row.get("squeeze_fired_dn"):
+        volatility_signals.append(("TTM 挤压向下释放", -1))
+    elif row.get("squeeze_on"):
+        volatility_signals.append(("TTM 挤压中 (低波动, 等待突破)", 0))
+
+    # Keltner 突破
+    if row.get("kc_break_up"):
+        volatility_signals.append(("Keltner 上轨突破", +1))
+    elif row.get("kc_break_dn"):
+        volatility_signals.append(("Keltner 下轨突破", -1))
 
     scores["volatility"] = _summarize_signals("波动率", volatility_signals)
 

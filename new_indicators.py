@@ -15,6 +15,10 @@ New Technical Indicators Module
    - NX: 多空通道 (Bull-Bear Channel)
    - CD: MACD 背离检测 (MACD Divergence)
 10. TRIX (三重指数平滑)
+11. Keltner Channels (肯特纳通道)
+12. Chaikin Money Flow (蔡金资金流)
+13. TTM Squeeze (TTM 挤压, Bollinger 在 Keltner 内)
+14. Heikin-Ashi (平均K线)
 
 每个指标都有:
 - 完整计算逻辑 (无占位符)
@@ -455,6 +459,245 @@ def add_trix(df, period=15, signal=9):
 
 
 # =============================================================================
+# 11. Keltner Channels (肯特纳通道)
+# 原理: EMA 中线 ± multiplier * ATR, 类似 Bollinger 但用 ATR 而非标准差
+# 局限性: 对 multiplier 敏感; 突破信号在横盘市频繁假信号
+# =============================================================================
+def add_keltner(df, ema_period=20, atr_period=10, multiplier=2.0):
+    """
+    Keltner Channels:
+      Middle = EMA(close, ema_period)
+      Upper  = Middle + multiplier * ATR(atr_period)
+      Lower  = Middle - multiplier * ATR(atr_period)
+
+    信号:
+      kc_above_upper: 收盘 > 上轨 (强势突破)
+      kc_below_lower: 收盘 < 下轨 (弱势突破)
+      kc_inside: 收盘在通道内 (正常区间)
+      kc_break_up: 当根从内部突破到上方
+      kc_break_dn: 当根从内部突破到下方
+    """
+    df = df.copy()
+
+    h_l = df["high"] - df["low"]
+    h_c = (df["high"] - df["close"].shift(1)).abs()
+    l_c = (df["low"] - df["close"].shift(1)).abs()
+    tr = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1)
+    atr_kc = tr.ewm(span=atr_period, adjust=False).mean()
+
+    df["kc_middle"] = df["close"].ewm(span=ema_period, adjust=False).mean()
+    df["kc_upper"] = df["kc_middle"] + multiplier * atr_kc
+    df["kc_lower"] = df["kc_middle"] - multiplier * atr_kc
+
+    above = df["close"] > df["kc_upper"]
+    below = df["close"] < df["kc_lower"]
+    df["kc_above_upper"] = above.fillna(False).astype(bool)
+    df["kc_below_lower"] = below.fillna(False).astype(bool)
+    df["kc_inside"] = (~df["kc_above_upper"] & ~df["kc_below_lower"]).astype(bool)
+
+    prev_above = above.shift(1).fillna(False).astype(bool)
+    prev_below = below.shift(1).fillna(False).astype(bool)
+    df["kc_break_up"] = (df["kc_above_upper"] & ~prev_above).astype(bool)
+    df["kc_break_dn"] = (df["kc_below_lower"] & ~prev_below).astype(bool)
+
+    return df
+
+
+# =============================================================================
+# 12. Chaikin Money Flow (CMF, 蔡金资金流)
+# 原理: 用收盘在 K 线内的位置 + 成交量, 衡量买卖压力
+# 局限性: 跳空缺口扭曲读数; 低成交量股票噪音大
+# =============================================================================
+def add_cmf(df, period=20):
+    """
+    Money Flow Multiplier = ((C-L) - (H-C)) / (H-L)
+    Money Flow Volume     = MFM * Volume
+    CMF = sum(MFV, period) / sum(Volume, period)
+
+    信号:
+      cmf_positive: CMF > 0 (买盘资金流入)
+      cmf_negative: CMF < 0 (卖盘资金流出)
+      cmf_strong_bull: CMF > 0.25 (强烈买盘)
+      cmf_strong_bear: CMF < -0.25 (强烈卖盘)
+      cmf_cross_zero_up: CMF 上穿 0
+      cmf_cross_zero_dn: CMF 下穿 0
+    """
+    df = df.copy()
+
+    hl_range = (df["high"] - df["low"]).replace(0, np.nan)
+    mfm = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / hl_range
+    mfm = mfm.fillna(0)
+    mfv = mfm * df["volume"]
+
+    vol_sum = df["volume"].rolling(period).sum().replace(0, np.nan)
+    df["cmf"] = (mfv.rolling(period).sum() / vol_sum).fillna(0)
+
+    df["cmf_positive"] = (df["cmf"] > 0).astype(bool)
+    df["cmf_negative"] = (df["cmf"] < 0).astype(bool)
+    df["cmf_strong_bull"] = (df["cmf"] > 0.25).astype(bool)
+    df["cmf_strong_bear"] = (df["cmf"] < -0.25).astype(bool)
+
+    prev = df["cmf"].shift(1).fillna(0)
+    df["cmf_cross_zero_up"] = ((df["cmf"] > 0) & (prev <= 0)).astype(bool)
+    df["cmf_cross_zero_dn"] = ((df["cmf"] < 0) & (prev >= 0)).astype(bool)
+
+    return df
+
+
+# =============================================================================
+# 13. TTM Squeeze (TTM 挤压)
+# 原理: John Carter 的低波动率检测 — Bollinger Bands 完全在 Keltner 内 = 挤压
+#       挤压释放时(BB 重新走出 KC) + 动量方向 = 突破方向
+# 局限性: 只检测条件, 不预测方向 (要配合动量); 假突破常见
+# 依赖: 需先计算 Bollinger Bands (extended_signals 已计算 bb_upper/bb_lower)
+#       和 Keltner Channels (本模块 add_keltner)
+# =============================================================================
+def add_ttm_squeeze(df, momentum_period=20):
+    """
+    依赖列: bb_upper, bb_lower, kc_upper, kc_lower
+
+    信号:
+      squeeze_on: BB 完全在 KC 内 (压缩, 等待突破)
+      squeeze_off: BB 至少一侧在 KC 外 (释放)
+      squeeze_fired_up: 上一根 squeeze_on 且当根 squeeze_off, 动量 > 0 (向上释放)
+      squeeze_fired_dn: 上一根 squeeze_on 且当根 squeeze_off, 动量 < 0 (向下释放)
+      squeeze_momentum: 动量值 (用线性回归斜率近似, 用于柱状)
+    """
+    df = df.copy()
+
+    needed = ["bb_upper", "bb_lower", "kc_upper", "kc_lower"]
+    for col in needed:
+        if col not in df.columns:
+            # 调用方未计算 BB/KC, 输出全 False, 不抛错
+            df["squeeze_on"] = False
+            df["squeeze_off"] = False
+            df["squeeze_fired_up"] = False
+            df["squeeze_fired_dn"] = False
+            df["squeeze_momentum"] = 0.0
+            return df
+
+    on = (df["bb_upper"] <= df["kc_upper"]) & (df["bb_lower"] >= df["kc_lower"])
+    df["squeeze_on"] = on.fillna(False).astype(bool)
+    df["squeeze_off"] = (~df["squeeze_on"]).astype(bool)
+
+    # 动量: 收盘相对 (最近 N 根的 (高低中点 + KC 中线)/2 的偏差) 的线性回归值
+    # John Carter 原版用线性回归取最后一个值, 这里用 close - midpoint 的 EMA 近似
+    n = momentum_period
+    high_n = df["high"].rolling(n).max()
+    low_n = df["low"].rolling(n).min()
+    sma_n = df["close"].rolling(n).mean()
+    midpoint = (((high_n + low_n) / 2) + sma_n) / 2
+    delta = df["close"] - midpoint
+
+    # 用滚动线性回归的最后一点(斜率 * (n-1) + 截距 = 拟合的当根值)
+    def _linreg_last(series):
+        if series.isna().any():
+            return np.nan
+        x = np.arange(len(series), dtype=float)
+        y = series.values
+        x_mean = x.mean()
+        y_mean = y.mean()
+        denom = ((x - x_mean) ** 2).sum()
+        if denom == 0:
+            return 0.0
+        slope = ((x - x_mean) * (y - y_mean)).sum() / denom
+        intercept = y_mean - slope * x_mean
+        return slope * x[-1] + intercept
+
+    df["squeeze_momentum"] = delta.rolling(n).apply(_linreg_last, raw=False).fillna(0)
+
+    # Fired: 上一根 squeeze_on, 当根 squeeze_off
+    prev_on = df["squeeze_on"].shift(1).fillna(False).astype(bool)
+    fired = prev_on & df["squeeze_off"]
+    df["squeeze_fired_up"] = (fired & (df["squeeze_momentum"] > 0)).astype(bool)
+    df["squeeze_fired_dn"] = (fired & (df["squeeze_momentum"] < 0)).astype(bool)
+
+    return df
+
+
+# =============================================================================
+# 14. Heikin-Ashi (平均K线)
+# 原理: 用平滑后的 OHLC 重新画 K 线, 过滤掉短线噪音, 让趋势更直观
+# 局限性: 不是真实价格, 不能用于精确入场点; 拐点会滞后
+# =============================================================================
+def add_heikin_ashi(df):
+    """
+    HA-Close = (O + H + L + C) / 4
+    HA-Open  = (prev HA-Open + prev HA-Close) / 2  (首根 = (O+C)/2)
+    HA-High  = max(H, HA-Open, HA-Close)
+    HA-Low   = min(L, HA-Open, HA-Close)
+
+    信号:
+      ha_bullish: HA 阳线 (HA-Close > HA-Open)
+      ha_bearish: HA 阴线 (HA-Close < HA-Open)
+      ha_strong_bull: 连续 3 根阳线且无下影线 (强势上升)
+      ha_strong_bear: 连续 3 根阴线且无上影线 (强势下跌)
+      ha_doji: HA 十字星 (实体极小, 趋势可能反转)
+      ha_flip_bull: 前一根阴, 当根阳 (转涨)
+      ha_flip_bear: 前一根阳, 当根阴 (转跌)
+    """
+    df = df.copy()
+    n = len(df)
+
+    if n == 0:
+        for col in ["ha_open", "ha_high", "ha_low", "ha_close"]:
+            df[col] = pd.Series(dtype=float)
+        for col in ["ha_bullish", "ha_bearish", "ha_strong_bull", "ha_strong_bear",
+                    "ha_doji", "ha_flip_bull", "ha_flip_bear"]:
+            df[col] = pd.Series(dtype=bool)
+        return df
+
+    o = df["open"].values
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+
+    ha_close = (o + h + l + c) / 4.0
+    ha_open = np.zeros(n)
+    ha_open[0] = (o[0] + c[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
+
+    ha_high = np.maximum.reduce([h, ha_open, ha_close])
+    ha_low = np.minimum.reduce([l, ha_open, ha_close])
+
+    df["ha_open"] = ha_open
+    df["ha_high"] = ha_high
+    df["ha_low"] = ha_low
+    df["ha_close"] = ha_close
+
+    bullish = ha_close > ha_open
+    bearish = ha_close < ha_open
+    df["ha_bullish"] = bullish.astype(bool)
+    df["ha_bearish"] = bearish.astype(bool)
+
+    # 强势: 连续 3 根 + 无对应方向影线
+    no_lower_wick = ha_low >= np.minimum(ha_open, ha_close) - 1e-9
+    no_upper_wick = ha_high <= np.maximum(ha_open, ha_close) + 1e-9
+
+    bull_series = pd.Series(bullish & no_lower_wick)
+    bear_series = pd.Series(bearish & no_upper_wick)
+    df["ha_strong_bull"] = (
+        bull_series & bull_series.shift(1).fillna(False) & bull_series.shift(2).fillna(False)
+    ).fillna(False).astype(bool)
+    df["ha_strong_bear"] = (
+        bear_series & bear_series.shift(1).fillna(False) & bear_series.shift(2).fillna(False)
+    ).fillna(False).astype(bool)
+
+    # Doji: 实体小于平均实体的 10%
+    body = np.abs(ha_close - ha_open)
+    body_avg = pd.Series(body).rolling(20).mean().bfill().values
+    df["ha_doji"] = (body < 0.1 * np.where(body_avg > 0, body_avg, 1e-9)).astype(bool)
+
+    prev_bull = pd.Series(bullish).shift(1).fillna(False).astype(bool).values
+    prev_bear = pd.Series(bearish).shift(1).fillna(False).astype(bool).values
+    df["ha_flip_bull"] = (bullish & prev_bear).astype(bool)
+    df["ha_flip_bear"] = (bearish & prev_bull).astype(bool)
+
+    return df
+
+
+# =============================================================================
 # 背离检测通用函数 (供 RSI, OBV, MACD 等多个指标调用)
 # =============================================================================
 def _detect_divergence(df, indicator_col, direction="bullish", lookback=60, min_swing=5):
@@ -533,7 +776,13 @@ def _detect_divergence(df, indicator_col, direction="bullish", lookback=60, min_
 # 主入口: 计算所有新指标
 # =============================================================================
 def compute_new_indicators(df):
-    """一次性计算所有新指标"""
+    """
+    一次性计算所有新指标。
+    顺序很重要:
+      - add_keltner 必须在 add_ttm_squeeze 之前 (TTM 依赖 KC 列)
+      - TTM 还依赖 bb_upper/bb_lower; 这些列由 extended_signals.compute_all_signals 提供,
+        因此 compute_new_indicators 应在 compute_all_signals 之后调用 (app.py 已如此)。
+    """
     df = add_rsi(df)
     df = add_cci(df)
     df = add_williams_r(df)
@@ -544,4 +793,8 @@ def compute_new_indicators(df):
     df = add_ichimoku(df)
     df = add_nxcd(df)
     df = add_trix(df)
+    df = add_keltner(df)
+    df = add_cmf(df)
+    df = add_ttm_squeeze(df)
+    df = add_heikin_ashi(df)
     return df
