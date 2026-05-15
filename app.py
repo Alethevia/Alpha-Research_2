@@ -27,6 +27,7 @@ from new_indicators import compute_new_indicators
 from confluence import compute_confluence_summary
 from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
 import finnhub_data
+from conformal import probability_forecast
 
 st.set_page_config(
     page_title="技术指标频率分析",
@@ -777,6 +778,65 @@ with tab1:
                 snap_cols3[4].metric("特殊事件", f"{len(hints)} 个" if hints else "无")
                 if hints:
                     st.caption("⚡ " + ", ".join(hints))
+
+                # === 概率预测 (Conformal Prediction) ===
+                st.markdown("---")
+                st.markdown("## 🎲 概率预测 (实验性 / 校准区间)")
+                st.caption(
+                    "用 AR(5) 对数收益率模型 + Split Conformal 校准, 给出未来 N 个交易日的"
+                    "**点预测 + 置信区间 + 上涨概率**。Conformal 提供分布无关的覆盖率保证。"
+                )
+                pf_col_a, pf_col_b, pf_col_c = st.columns([1, 1, 2])
+                with pf_col_a:
+                    pf_horizon = st.selectbox("预测期 (交易日)", [5, 10, 20], index=1, key="t1_pf_h")
+                with pf_col_b:
+                    pf_conf = st.selectbox("置信水平",
+                                           ["80% (alpha=0.20)", "90% (alpha=0.10)", "95% (alpha=0.05)"],
+                                           index=1, key="t1_pf_conf")
+                pf_alpha = {"80% (alpha=0.20)": 0.20, "90% (alpha=0.10)": 0.10, "95% (alpha=0.05)": 0.05}[pf_conf]
+
+                with st.spinner("计算 conformal 校准..."):
+                    pf = probability_forecast(df_full, horizon=pf_horizon, alpha=pf_alpha)
+
+                if not pf["ok"]:
+                    st.warning(f"无法计算: {pf['error']}")
+                else:
+                    pfm1, pfm2, pfm3, pfm4 = st.columns(4)
+                    pfm1.metric(f"点预测 ({pf_horizon}d 收益率)",
+                                f"{pf['point_pct']:+.2f}%",
+                                delta_color="off")
+                    pfm2.metric(f"{int((1-pf_alpha)*100)}% 置信区间",
+                                f"[{pf['lower_pct']:+.1f}%, {pf['upper_pct']:+.1f}%]")
+                    pfm3.metric("P(上涨)",
+                                f"{pf['p_up']*100:.1f}%",
+                                f"基线 {pf['naive_p_up_baseline']*100:.1f}%",
+                                delta_color="off")
+                    pfm4.metric(f"P(>+5%)  /  P(<-5%)",
+                                f"{pf['p_up_5pct']*100:.1f}% / {pf['p_dn_5pct']*100:.1f}%")
+
+                    cov = pf['calibration_coverage']
+                    nominal = 1 - pf_alpha
+                    cov_diff = cov - nominal
+                    if abs(cov_diff) < 0.03:
+                        cov_state = "✅ 校准良好"
+                    elif abs(cov_diff) < 0.06:
+                        cov_state = "⚠️ 校准轻微偏差"
+                    else:
+                        cov_state = "❌ 校准明显偏差 (近期波动率不稳定)"
+                    st.caption(
+                        f"**校准检查**: 校准集 n={pf['calibration_n']}, 实测覆盖率 = "
+                        f"{cov*100:.1f}% (名义 {nominal*100:.0f}%) → {cov_state}。"
+                        f" 方法: {pf['method']}。"
+                    )
+                    st.error(
+                        "⚠️ **概率预测重要免责**: \n\n"
+                        "• 这是一个简单 AR(5) 基线模型, **预测精度通常很差** "
+                        "(AR 在金融时间序列上方差解释力 < 5%, 这是公开学术共识)\n\n"
+                        "• Conformal 区间假设 *exchangeability*, 时间序列违反此假设, "
+                        "实际覆盖率可能略低于名义值\n\n"
+                        "• 校准基于过去 100 个滚动窗口, 无法预知 regime change / 黑天鹅事件\n\n"
+                        "• **不构成投资建议, 不预测真实未来价格**, 仅供方法论展示"
+                    )
 
                 # === 当前触发的信号 ===
                 st.markdown("---")
