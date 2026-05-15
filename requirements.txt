@@ -5,6 +5,10 @@ yfinance>=0.2
 scipy>=1.10
 plotly>=5.18
 
+# === External data providers ===
+finnhub-python>=2.4
+openai>=1.30
+
 # === Optional: alternative UI (Gradio entry point in gradio_app.py) ===
 # Streamlit is the primary UI; gradio_app.py is provided as a fall-back for
 # environments where Streamlit reruns are unstable. Remove if not using.

@@ -678,10 +678,14 @@ def add_heikin_ashi(df):
     bull_series = pd.Series(bullish & no_lower_wick)
     bear_series = pd.Series(bearish & no_upper_wick)
     df["ha_strong_bull"] = (
-        bull_series & bull_series.shift(1).fillna(False) & bull_series.shift(2).fillna(False)
+        bull_series
+        & bull_series.shift(1).fillna(False).astype(bool)
+        & bull_series.shift(2).fillna(False).astype(bool)
     ).fillna(False).astype(bool)
     df["ha_strong_bear"] = (
-        bear_series & bear_series.shift(1).fillna(False) & bear_series.shift(2).fillna(False)
+        bear_series
+        & bear_series.shift(1).fillna(False).astype(bool)
+        & bear_series.shift(2).fillna(False).astype(bool)
     ).fillna(False).astype(bool)
 
     # Doji: 实体小于平均实体的 10%

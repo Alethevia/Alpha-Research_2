@@ -211,7 +211,7 @@ DISCLAIMER_MD = (
     "仅展示客观检测的技术事件、21 年回测的历史频率。"
     "**过去频率不能预测未来。** 作者非美国持牌投资顾问 (RIA)。所有交易决定为使用者自身责任。\n\n"
     "This tool does NOT predict future prices, NOT provide investment advice, "
-    "NOT recommend buying/selling any security."
+    "NOT issue any buy or sell recommendations on any security."
 )
 
 

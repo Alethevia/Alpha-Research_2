@@ -1,49 +1,44 @@
 """
-Finnhub.io 免费版数据接入
-Finnhub Free-tier Data Client
-================================
-免费层提供:
-  - 公司新闻 (company-news)
-  - 新闻情绪 (news-sentiment)
-  - 内幕交易 (stock/insider-transactions)
-  - 分析师推荐 (stock/recommendation)
-  - 财报历史/惊喜 (calendar/earnings, stock/earnings)
-  - 60 次/分钟 速率限制 (足够本工具单股查询使用)
+Finnhub.io 完整整合 (使用官方 finnhub-python 客户端)
+====================================================
+环境变量: FINNHUB_API_KEY (从 https://finnhub.io 免费获取, 60 次/分钟)
 
-凭证:
-  从 https://finnhub.io 注册免费账户, 拷贝 API key, 设置环境变量
-  FINNHUB_API_KEY=<your-key>。也可通过 Streamlit secrets 注入。
+5 个数据源 (全部为真实 API 调用, 无 mock):
+  1. company_news               — 公司新闻 + 头条情绪 (按 Finnhub 头条分类聚合估计)
+  2. stock_insider_transactions — 高管/董事 SEC Form 4 申报
+  3. recommendation_trends      — 分析师评级汇总 (强买/买/持/卖/强卖)
+  4. earnings_calendar          — 财报日历 + 实际 vs 预期 EPS
+  5. company_basic_financials   — 基础财务指标 (P/E, ROE, 营收增长等)
 
-设计:
-  - 只用 urllib (无新依赖, 避免版本冲突)
-  - 所有函数都返回 dict: {"ok": bool, "data": ..., "error": str|None}
-  - 网络/JSON 错误静默捕获 → ok=False (调用方判断)
-  - 用 functools.lru_cache 做进程内缓存 (单 TTL 由调用方控制)
+每个函数返回:
+  {"ok": bool, "data": <list|dict>, "error": str|None, "raw": <原始 JSON>}
 
-法律:
-  分析师推荐 (买/持/卖) 是 *第三方机构观点*, 不构成本工具的建议。
-  UI 层必须明确标注 "外部数据" 并禁止任何 "我们推荐..." 措辞。
+错误模式 (全部静默捕获, 不让 Streamlit 崩溃):
+  - 无 key → ok=False, error="no_key"
+  - 网络错误 → ok=False, error="network: ..."
+  - API 错误 (rate limit/403/404) → ok=False, error="api: ..."
+  - 空响应 → ok=True, data=[], error=None
+
+法律提示:
+  分析师评级是第三方机构观点, 不是本工具的建议。
+  情绪分基于头条 NLP, 可能误读上下文。
 """
 
 from __future__ import annotations
 
-import json
 import os
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
-_BASE = "https://finnhub.io/api/v1"
-_TIMEOUT = 10
+_CLIENT_CACHE: dict[str, Any] = {}
 
 
 def get_api_key() -> str | None:
-    """读取 API key。优先环境变量, 其次 Streamlit secrets (如可用)。"""
+    """读取 API key (env 优先, 然后 Streamlit secrets)."""
     key = os.environ.get("FINNHUB_API_KEY", "").strip()
     if key:
         return key
-    # Streamlit secrets (只有在 Streamlit 上下文中才可用)
     try:
         import streamlit as st
         secret = st.secrets.get("FINNHUB_API_KEY") if hasattr(st, "secrets") else None
@@ -54,194 +49,348 @@ def get_api_key() -> str | None:
     return None
 
 
-def _call(path: str, params: dict) -> dict:
+def _client():
+    """缓存的 finnhub.Client. 没 key 返回 None."""
     key = get_api_key()
     if not key:
-        return {"ok": False, "data": None, "error": "no_key"}
-
-    qs = urllib.parse.urlencode({**params, "token": key})
-    url = f"{_BASE}/{path.lstrip('/')}?{qs}"
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "AlphaResearch-Educational/1.0",
-        "Accept": "application/json",
-    })
+        return None
+    if _CLIENT_CACHE.get("key") == key and _CLIENT_CACHE.get("client") is not None:
+        return _CLIENT_CACHE["client"]
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
-            body = r.read()
-            return {"ok": True, "data": json.loads(body), "error": None}
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8", errors="ignore")[:300]
-        except Exception:
-            err_body = ""
-        return {"ok": False, "data": None,
-                "error": f"HTTP {e.code}: {err_body}"}
-    except urllib.error.URLError as e:
-        return {"ok": False, "data": None, "error": f"network: {e.reason}"}
-    except (json.JSONDecodeError, ValueError) as e:
-        return {"ok": False, "data": None, "error": f"json: {e}"}
-    except Exception as e:
-        return {"ok": False, "data": None, "error": f"unexpected: {e}"}
+        import finnhub
+        client = finnhub.Client(api_key=key)
+        _CLIENT_CACHE["key"] = key
+        _CLIENT_CACHE["client"] = client
+        return client
+    except ImportError:
+        return None
+    except Exception:
+        return None
 
 
-# =============================================================================
-# 公司新闻 (Company News)
-# =============================================================================
-def get_company_news(symbol: str, days_back: int = 7, limit: int = 20) -> dict:
+def _err(msg: str, data=None):
+    return {"ok": False, "data": data if data is not None else [], "error": msg, "raw": None}
+
+
+def _ok(data, raw=None):
+    return {"ok": True, "data": data, "error": None, "raw": raw}
+
+
+# Heuristic English-only sentiment lexicon for headline scoring.
+# Finnhub's free tier does NOT include per-article sentiment in company_news;
+# we derive a lightweight score from headlines so the UI can show a column.
+_POS_WORDS = (
+    "beat", "beats", "surge", "surges", "soar", "soars", "rally", "rallies",
+    "upgrade", "upgrades", "upgraded", "raises", "raised", "outperform",
+    "record", "strong", "strength", "jumps", "jumped", "bullish", "buy",
+    "wins", "won", "growth", "boost", "boosts", "boosted", "rises", "rose",
+    "expand", "expands", "expanded", "innovation", "approved", "approves",
+)
+_NEG_WORDS = (
+    "miss", "misses", "missed", "plunge", "plunges", "slump", "slumps",
+    "downgrade", "downgrades", "downgraded", "cut", "cuts", "lowered", "lowers",
+    "underperform", "weak", "weakness", "drop", "drops", "dropped",
+    "bearish", "sell", "loss", "losses", "warns", "warning", "fall", "fell",
+    "fraud", "lawsuit", "investigation", "probe", "decline", "declines",
+    "shrink", "shrinks", "shrank", "concern", "concerns", "risk",
+)
+
+
+def _score_headline(text: str) -> float:
     """
-    获取一只股票最近 N 天的公司新闻。
-    Returns: {"ok": bool, "data": list[{datetime, headline, source, summary, url, image, category}], "error"}
+    -1..+1 启发式情绪分 (基于英文头条词频).
+    Finnhub 免费版的 company_news 返回中不包含 article-level sentiment,
+    所以我们在这里做一个透明的 fallback. UI 必须标注 "启发式".
+    """
+    if not text:
+        return 0.0
+    t = text.lower()
+    pos = sum(1 for w in _POS_WORDS if w in t)
+    neg = sum(1 for w in _NEG_WORDS if w in t)
+    if pos == 0 and neg == 0:
+        return 0.0
+    return (pos - neg) / max(1, pos + neg)
+
+
+# =============================================================================
+# 1. Company News + 情绪
+# =============================================================================
+def get_company_news(symbol: str, days_back: int = 7, limit: int = 25) -> dict:
+    """
+    finnhub.Client.company_news(symbol, _from, to) → list[dict].
+    每条新闻包含: category, datetime (unix), headline, id, image, related,
+                  source, summary, url.
     """
     if not symbol:
-        return {"ok": False, "data": [], "error": "no_symbol"}
+        return _err("no_symbol")
+    client = _client()
+    if client is None:
+        return _err("no_key")
 
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=max(1, days_back))
-    r = _call("company-news", {
-        "symbol": symbol.upper(),
-        "from": start.strftime("%Y-%m-%d"),
-        "to": today.strftime("%Y-%m-%d"),
-    })
-    if not r["ok"]:
-        return {"ok": False, "data": [], "error": r["error"]}
+    try:
+        raw = client.company_news(
+            symbol.upper(),
+            _from=start.strftime("%Y-%m-%d"),
+            to=today.strftime("%Y-%m-%d"),
+        )
+    except Exception as e:
+        return _err(f"api: {e}")
 
-    items = r["data"] or []
-    # 时间戳 -> ISO 字符串, 截取前 N 条
-    cleaned = []
-    for it in items[:limit]:
-        ts = it.get("datetime")
+    if not isinstance(raw, list):
+        return _ok([], raw=raw)
+
+    items = []
+    for n in raw[:limit]:
+        if not isinstance(n, dict):
+            continue
+        ts = n.get("datetime")
         if isinstance(ts, (int, float)) and ts > 0:
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            ts_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+            dt_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+            sort_key = float(ts)
         else:
-            ts_str = ""
-        cleaned.append({
-            "datetime": ts_str,
-            "headline": it.get("headline") or "",
-            "source": it.get("source") or "",
-            "summary": (it.get("summary") or "")[:400],
-            "url": it.get("url") or "",
-            "category": it.get("category") or "",
-            "image": it.get("image") or "",
+            dt_str = ""
+            sort_key = 0.0
+        headline = (n.get("headline") or "").strip()
+        score = _score_headline(headline + " " + (n.get("summary") or ""))
+        items.append({
+            "datetime": dt_str,
+            "_sort": sort_key,
+            "headline": headline,
+            "source": n.get("source") or "",
+            "summary": (n.get("summary") or "")[:500],
+            "url": n.get("url") or "",
+            "category": n.get("category") or "",
+            "image": n.get("image") or "",
+            "sentiment_score": round(score, 3),
+            "sentiment_label": ("positive" if score > 0.2 else
+                                "negative" if score < -0.2 else "neutral"),
         })
-    return {"ok": True, "data": cleaned, "error": None}
+    items.sort(key=lambda x: x["_sort"], reverse=True)
+    for it in items:
+        it.pop("_sort", None)
 
+    # 汇总指标
+    if items:
+        avg_score = sum(x["sentiment_score"] for x in items) / len(items)
+        pos = sum(1 for x in items if x["sentiment_label"] == "positive")
+        neg = sum(1 for x in items if x["sentiment_label"] == "negative")
+    else:
+        avg_score, pos, neg = 0.0, 0, 0
 
-# =============================================================================
-# 新闻情绪 (News Sentiment)
-# =============================================================================
-def get_news_sentiment(symbol: str) -> dict:
-    """
-    Finnhub 的"新闻情绪"分数 (基于一周新闻).
-    Returns 字段:
-      buzz: {articlesInLastWeek, buzz, weeklyAverage}
-      companyNewsScore (0~1): 越接近 1 越正面
-      sectorAverageBullishPercent
-      sentiment: {bearishPercent, bullishPercent}
-    """
-    if not symbol:
-        return {"ok": False, "data": None, "error": "no_symbol"}
-    r = _call("news-sentiment", {"symbol": symbol.upper()})
-    if not r["ok"]:
-        return r
-    d = r["data"] or {}
-    # 归一化输出
-    return {
-        "ok": True,
-        "error": None,
-        "data": {
-            "company_news_score": d.get("companyNewsScore"),
-            "sector_avg_bullish_pct": d.get("sectorAverageBullishPercent"),
-            "sector_avg_news_score": d.get("sectorAverageNewsScore"),
-            "articles_last_week": (d.get("buzz") or {}).get("articlesInLastWeek"),
-            "buzz": (d.get("buzz") or {}).get("buzz"),
-            "weekly_avg_articles": (d.get("buzz") or {}).get("weeklyAverage"),
-            "bullish_pct": (d.get("sentiment") or {}).get("bullishPercent"),
-            "bearish_pct": (d.get("sentiment") or {}).get("bearishPercent"),
+    return _ok({
+        "articles": items,
+        "summary": {
+            "total": len(items),
+            "avg_headline_score": round(avg_score, 3),
+            "positive_count": pos,
+            "negative_count": neg,
+            "neutral_count": len(items) - pos - neg,
         },
-    }
+    }, raw=raw)
 
 
 # =============================================================================
-# 内幕交易 (Insider Transactions)
+# 2. Insider transactions (SEC Form 4)
 # =============================================================================
-def get_insider_transactions(symbol: str, limit: int = 20) -> dict:
-    """
-    最近内幕交易 (高管/董事的买入卖出申报).
-    Returns: list[{name, share, transactionDate, transactionPrice, transactionCode}]
-      transactionCode: P=Purchase, S=Sale, A=Award, M=Option exercise, ...
-    """
+def get_insider_transactions(symbol: str, days_back: int = 180, limit: int = 30) -> dict:
     if not symbol:
-        return {"ok": False, "data": [], "error": "no_symbol"}
-    r = _call("stock/insider-transactions", {"symbol": symbol.upper()})
-    if not r["ok"]:
-        return {"ok": False, "data": [], "error": r["error"]}
-    items = (r["data"] or {}).get("data") or []
-    items = sorted(items, key=lambda x: x.get("transactionDate") or "", reverse=True)
-    cleaned = []
-    for it in items[:limit]:
-        cleaned.append({
-            "name": it.get("name") or "",
-            "share": it.get("share"),  # 净变动股数 (可负)
-            "change": it.get("change"),  # 变动股数 (有符号)
+        return _err("no_symbol")
+    client = _client()
+    if client is None:
+        return _err("no_key")
+
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days_back)
+    try:
+        raw = client.stock_insider_transactions(
+            symbol.upper(),
+            _from=start.strftime("%Y-%m-%d"),
+            to=today.strftime("%Y-%m-%d"),
+        )
+    except Exception as e:
+        return _err(f"api: {e}")
+
+    data_list = []
+    if isinstance(raw, dict):
+        data_list = raw.get("data") or []
+    elif isinstance(raw, list):
+        data_list = raw
+
+    items = []
+    for it in data_list:
+        if not isinstance(it, dict):
+            continue
+        items.append({
+            "name": (it.get("name") or "").strip(),
+            "share": it.get("share"),
+            "change": it.get("change"),
+            "filingDate": it.get("filingDate") or "",
             "transactionDate": it.get("transactionDate") or "",
             "transactionPrice": it.get("transactionPrice"),
-            "transactionCode": it.get("transactionCode") or "",
-            "filingDate": it.get("filingDate") or "",
+            "transactionCode": (it.get("transactionCode") or "").strip(),
         })
-    return {"ok": True, "data": cleaned, "error": None}
+    items.sort(key=lambda x: x["transactionDate"], reverse=True)
+    items = items[:limit]
+
+    # 汇总
+    buy_shares = sum(int(x["change"]) for x in items
+                     if isinstance(x["change"], (int, float)) and x["change"] > 0)
+    sell_shares = -sum(int(x["change"]) for x in items
+                       if isinstance(x["change"], (int, float)) and x["change"] < 0)
+    return _ok({
+        "transactions": items,
+        "summary": {
+            "n": len(items),
+            "buy_shares": buy_shares,
+            "sell_shares": sell_shares,
+            "net_shares": buy_shares - sell_shares,
+        },
+    }, raw=raw)
 
 
 # =============================================================================
-# 分析师推荐汇总 (Recommendation Trends)
+# 3. Analyst recommendation trends
 # =============================================================================
-def get_recommendations(symbol: str) -> dict:
-    """
-    分析师推荐汇总 (过去 4 个月每月一行). **外部第三方观点**, 不是本工具建议。
-    Returns: list[{period, buy, hold, sell, strongBuy, strongSell}]
-    """
+def get_recommendations(symbol: str, limit: int = 6) -> dict:
     if not symbol:
-        return {"ok": False, "data": [], "error": "no_symbol"}
-    r = _call("stock/recommendation", {"symbol": symbol.upper()})
-    if not r["ok"]:
-        return {"ok": False, "data": [], "error": r["error"]}
-    items = r["data"] or []
-    items = sorted(items, key=lambda x: x.get("period") or "", reverse=True)
-    cleaned = []
-    for it in items[:6]:
-        cleaned.append({
-            "period": it.get("period") or "",
-            "strongBuy": it.get("strongBuy", 0),
-            "buy": it.get("buy", 0),
-            "hold": it.get("hold", 0),
-            "sell": it.get("sell", 0),
-            "strongSell": it.get("strongSell", 0),
+        return _err("no_symbol")
+    client = _client()
+    if client is None:
+        return _err("no_key")
+    try:
+        raw = client.recommendation_trends(symbol.upper())
+    except Exception as e:
+        return _err(f"api: {e}")
+
+    if not isinstance(raw, list):
+        return _ok([], raw=raw)
+
+    rows = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        rows.append({
+            "period": r.get("period") or "",
+            "strongBuy": int(r.get("strongBuy") or 0),
+            "buy": int(r.get("buy") or 0),
+            "hold": int(r.get("hold") or 0),
+            "sell": int(r.get("sell") or 0),
+            "strongSell": int(r.get("strongSell") or 0),
         })
-    return {"ok": True, "data": cleaned, "error": None}
+    rows.sort(key=lambda x: x["period"], reverse=True)
+    rows = rows[:limit]
+    return _ok(rows, raw=raw)
 
 
 # =============================================================================
-# 财报历史 / 惊喜 (Earnings Surprise)
+# 4. Earnings calendar (历史 + 即将到来)
 # =============================================================================
-def get_earnings_surprise(symbol: str) -> dict:
-    """
-    最近 4 季度财报 vs 分析师预期.
-    Returns: list[{period, actual, estimate, surprise, surprisePercent}]
-    """
+def get_earnings_calendar(symbol: str, days_back: int = 365, days_ahead: int = 90) -> dict:
     if not symbol:
-        return {"ok": False, "data": [], "error": "no_symbol"}
-    r = _call("stock/earnings", {"symbol": symbol.upper(), "limit": 4})
-    if not r["ok"]:
-        return {"ok": False, "data": [], "error": r["error"]}
-    items = r["data"] or []
-    items = sorted(items, key=lambda x: x.get("period") or "", reverse=True)
-    cleaned = []
-    for it in items[:4]:
-        cleaned.append({
-            "period": it.get("period") or "",
-            "actual": it.get("actual"),
-            "estimate": it.get("estimate"),
-            "surprise": it.get("surprise"),
-            "surprisePercent": it.get("surprisePercent"),
-        })
-    return {"ok": True, "data": cleaned, "error": None}
+        return _err("no_symbol")
+    client = _client()
+    if client is None:
+        return _err("no_key")
+
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days_back)
+    end = today + timedelta(days=days_ahead)
+    try:
+        raw = client.earnings_calendar(
+            _from=start.strftime("%Y-%m-%d"),
+            to=end.strftime("%Y-%m-%d"),
+            symbol=symbol.upper(),
+            international=False,
+        )
+    except Exception as e:
+        return _err(f"api: {e}")
+
+    cal_list = []
+    if isinstance(raw, dict):
+        cal_list = raw.get("earningsCalendar") or []
+    elif isinstance(raw, list):
+        cal_list = raw
+
+    upcoming = []
+    historical = []
+    for it in cal_list:
+        if not isinstance(it, dict):
+            continue
+        item = {
+            "date": it.get("date") or "",
+            "hour": it.get("hour") or "",
+            "epsActual": it.get("epsActual"),
+            "epsEstimate": it.get("epsEstimate"),
+            "revenueActual": it.get("revenueActual"),
+            "revenueEstimate": it.get("revenueEstimate"),
+            "quarter": it.get("quarter"),
+            "year": it.get("year"),
+            "symbol": it.get("symbol") or symbol.upper(),
+        }
+        eps_act = item.get("epsActual")
+        eps_est = item.get("epsEstimate")
+        if isinstance(eps_act, (int, float)) and isinstance(eps_est, (int, float)) and eps_est != 0:
+            item["surprise_pct"] = round((eps_act - eps_est) / abs(eps_est) * 100, 2)
+        else:
+            item["surprise_pct"] = None
+
+        d = item["date"]
+        if d and d >= today.strftime("%Y-%m-%d"):
+            upcoming.append(item)
+        else:
+            historical.append(item)
+
+    historical.sort(key=lambda x: x["date"], reverse=True)
+    upcoming.sort(key=lambda x: x["date"])
+    return _ok({
+        "upcoming": upcoming[:4],
+        "historical": historical[:8],
+    }, raw=raw)
+
+
+# =============================================================================
+# 5. Basic financials
+# =============================================================================
+def get_basic_financials(symbol: str) -> dict:
+    if not symbol:
+        return _err("no_symbol")
+    client = _client()
+    if client is None:
+        return _err("no_key")
+    try:
+        raw = client.company_basic_financials(symbol.upper(), "all")
+    except Exception as e:
+        return _err(f"api: {e}")
+
+    metric = (raw or {}).get("metric") if isinstance(raw, dict) else {}
+    metric = metric or {}
+
+    def _g(k):
+        v = metric.get(k)
+        return v if isinstance(v, (int, float)) else None
+
+    parsed = {
+        "pe_ttm": _g("peTTM"),
+        "pe_basic_exclExtraTTM": _g("peBasicExclExtraTTM"),
+        "pb": _g("pbAnnual") or _g("pbQuarterly"),
+        "ps_ttm": _g("psTTM"),
+        "ev_to_ebitda_ttm": _g("currentEv/freeCashFlowTTM"),
+        "dividend_yield_ttm": _g("dividendYieldIndicatedAnnual"),
+        "roe_ttm": _g("roeTTM"),
+        "roa_ttm": _g("roaTTM"),
+        "gross_margin_ttm": _g("grossMarginTTM"),
+        "net_margin_ttm": _g("netProfitMarginTTM"),
+        "revenue_growth_3y": _g("revenueGrowth3Y"),
+        "revenue_growth_5y": _g("revenueGrowth5Y"),
+        "eps_growth_3y": _g("epsGrowth3Y"),
+        "eps_growth_5y": _g("epsGrowth5Y"),
+        "current_ratio": _g("currentRatioAnnual"),
+        "debt_to_equity": _g("totalDebt/totalEquityAnnual"),
+        "beta": _g("beta"),
+        "52_week_high": _g("52WeekHigh"),
+        "52_week_low": _g("52WeekLow"),
+    }
+    return _ok(parsed, raw=raw)

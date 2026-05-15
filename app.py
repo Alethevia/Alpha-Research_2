@@ -29,12 +29,18 @@ from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
 import finnhub_data
 from conformal import probability_forecast, conformalize_external_forecaster
 import kronos_predict
+import ai_analysis
+from auth import require_auth
 
 st.set_page_config(
     page_title="技术指标频率分析",
     page_icon="📊",
     layout="wide",
 )
+
+# Password gate — blocks everything below until user enters APP_PASSWORD.
+# No-op if APP_PASSWORD env var is not set (developer-friendly).
+require_auth()
 
 # ============== 信号中文翻译 ==============
 # Key 对应 historical_stats.py 里的 signal key
@@ -202,7 +208,7 @@ st.error(
 
 **过去频率不能预测未来。** 作者非美国持牌投资顾问 (RIA)。所有交易决定为使用者自身责任。
 
-This tool does NOT predict future prices, NOT provide investment advice, NOT recommend buying/selling any security.
+This tool does NOT predict future prices, NOT provide investment advice, NOT issue any buy or sell recommendations on any security.
 Past frequencies do not predict the future. Author is not a registered investment advisor. All trading decisions are 100% the user's responsibility.
 """)
 
@@ -313,17 +319,12 @@ def stability_badge_zh(stat):
 
 @st.cache_data(ttl=900)
 def fh_company_news(symbol: str, days_back: int = 7):
-    return finnhub_data.get_company_news(symbol, days_back=days_back, limit=20)
-
-
-@st.cache_data(ttl=1800)
-def fh_news_sentiment(symbol: str):
-    return finnhub_data.get_news_sentiment(symbol)
+    return finnhub_data.get_company_news(symbol, days_back=days_back, limit=25)
 
 
 @st.cache_data(ttl=3600)
 def fh_insider_tx(symbol: str):
-    return finnhub_data.get_insider_transactions(symbol, limit=20)
+    return finnhub_data.get_insider_transactions(symbol)
 
 
 @st.cache_data(ttl=3600)
@@ -332,24 +333,39 @@ def fh_recommendations(symbol: str):
 
 
 @st.cache_data(ttl=3600)
-def fh_earnings_surprise(symbol: str):
-    return finnhub_data.get_earnings_surprise(symbol)
+def fh_earnings_cal(symbol: str):
+    return finnhub_data.get_earnings_calendar(symbol)
+
+
+@st.cache_data(ttl=3600)
+def fh_basic_financials(symbol: str):
+    return finnhub_data.get_basic_financials(symbol)
+
+
+_INSIDER_CODE_ZH = {
+    "P": "买入 (Purchase)", "S": "卖出 (Sale)",
+    "A": "授予 (Award)", "M": "期权行权 (Option Exercise)",
+    "G": "赠予 (Gift)", "F": "缴税转让 (Tax Withholding)",
+    "D": "递交给发行人 (Disposition to Issuer)",
+    "J": "其他 (Other)",
+}
 
 
 def render_finnhub_section(sym: str):
     """渲染 Finnhub 数据面板。如未配置 API key, 显示如何获取的提示。"""
     api_key = finnhub_data.get_api_key()
     st.markdown("---")
-    st.markdown("## 📰 Finnhub 数据 (新闻 / 情绪 / 内幕 / 评级)")
+    st.markdown("## 📰 Finnhub 数据 (新闻 / 内幕 / 评级 / 财报 / 基本面)")
 
     if not api_key:
         st.info(
-            "🔑 **未配置 Finnhub API key** — 此面板提供新闻、情绪、内幕交易、分析师评级数据。\n\n"
+            "🔑 **未配置 Finnhub API key** — 此面板提供新闻、情绪、内幕交易、"
+            "分析师评级、财报日历、基础财务数据。\n\n"
             "获取免费 key (60 次/分钟, 永久免费):\n"
             "1. 访问 https://finnhub.io 注册账户\n"
             "2. 在 Dashboard 复制 API key\n"
-            "3. 设置环境变量: `export FINNHUB_API_KEY=<your-key>` 或在 HuggingFace Space "
-            "Settings → Variables and secrets 添加 `FINNHUB_API_KEY`\n"
+            "3. 设置环境变量: `export FINNHUB_API_KEY=<your-key>` 或在 HuggingFace "
+            "Space → Settings → Variables and secrets 添加 `FINNHUB_API_KEY`\n"
             "4. 重启应用"
         )
         return
@@ -359,97 +375,105 @@ def render_finnhub_section(sym: str):
         "**分析师推荐是第三方机构观点, 不是本工具的建议**。"
     )
 
-    fh_tabs = st.tabs(["📰 公司新闻", "📊 新闻情绪", "👤 内幕交易", "🎯 分析师评级", "💰 财报惊喜"])
+    fh_tabs = st.tabs([
+        "📰 公司新闻 + 情绪",
+        "👤 内幕交易",
+        "🎯 分析师评级",
+        "📅 财报日历",
+        "💼 基础财务",
+    ])
 
-    # === 公司新闻 ===
+    # === 1. 公司新闻 + 头条情绪 ===
     with fh_tabs[0]:
         with st.spinner("获取最近 7 天新闻..."):
             news = fh_company_news(sym, days_back=7)
         if not news["ok"]:
             st.warning(f"无法获取新闻: {news['error']}")
-        elif not news["data"]:
-            st.info("最近 7 天无相关新闻。")
         else:
-            for item in news["data"][:10]:
-                with st.container():
-                    st.markdown(f"**{item['headline']}**")
-                    st.caption(f"📅 {item['datetime']} | 📢 {item['source']} | 🏷️ {item['category']}")
-                    if item["summary"]:
-                        st.write(item["summary"])
-                    if item["url"]:
-                        st.caption(f"🔗 [原文链接]({item['url']})")
-                    st.markdown("---")
+            data = news["data"]
+            arts = data.get("articles", []) if isinstance(data, dict) else []
+            summ = data.get("summary", {}) if isinstance(data, dict) else {}
 
-    # === 新闻情绪 ===
+            if not arts:
+                st.info("最近 7 天无相关新闻。")
+            else:
+                # 头条情绪汇总 (启发式)
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                avg_score = summ.get("avg_headline_score", 0.0)
+                sc1.metric("头条平均情绪",
+                           f"{avg_score:+.2f}",
+                           help="−1 = 极负面, +1 = 极正面 (启发式英文头条评分, 仅供参考)")
+                sc2.metric("正面 / 中性 / 负面",
+                           f"{summ.get('positive_count', 0)} / "
+                           f"{summ.get('neutral_count', 0)} / "
+                           f"{summ.get('negative_count', 0)}")
+                sc3.metric("文章总数", summ.get("total", 0))
+                bullish_pct = (summ.get("positive_count", 0) /
+                               max(1, summ.get("total", 0)) * 100)
+                sc4.metric("正面占比", f"{bullish_pct:.0f}%")
+
+                st.caption(
+                    "⚠️ 情绪分基于英文头条关键词启发式 (positive/negative 词频), "
+                    "Finnhub 免费版不提供 article-level sentiment。仅供参考, 不构成预测。"
+                )
+
+                for item in arts[:15]:
+                    label = item.get("sentiment_label", "neutral")
+                    label_emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(label, "⚪")
+                    with st.container():
+                        st.markdown(f"{label_emoji} **{item['headline']}**")
+                        st.caption(
+                            f"📅 {item['datetime']} | 📢 {item['source']} | "
+                            f"🏷️ {item['category']} | 情绪: {item['sentiment_score']:+.2f}"
+                        )
+                        if item["summary"]:
+                            st.write(item["summary"])
+                        if item["url"]:
+                            st.caption(f"🔗 [原文链接]({item['url']})")
+                        st.markdown("---")
+
+    # === 2. 内幕交易 ===
     with fh_tabs[1]:
-        with st.spinner("获取新闻情绪..."):
-            sent = fh_news_sentiment(sym)
-        if not sent["ok"]:
-            st.warning(f"无法获取情绪数据: {sent['error']}")
-        elif not sent["data"]:
-            st.info("无情绪数据")
-        else:
-            d = sent["data"]
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            score = d.get("company_news_score")
-            sc1.metric("公司新闻情绪分 (0-1)",
-                       f"{score:.2f}" if score is not None else "—",
-                       help="越接近 1 = 整体新闻越正面 (Finnhub 计算, 仅供参考)")
-            sector_avg = d.get("sector_avg_news_score")
-            sc2.metric("行业平均",
-                       f"{sector_avg:.2f}" if sector_avg is not None else "—")
-            bull = d.get("bullish_pct")
-            sc3.metric("看涨新闻占比",
-                       f"{bull*100:.1f}%" if bull is not None else "—")
-            bear = d.get("bearish_pct")
-            sc4.metric("看跌新闻占比",
-                       f"{bear*100:.1f}%" if bear is not None else "—")
-
-            buzz = d.get("buzz")
-            arts = d.get("articles_last_week")
-            wkly = d.get("weekly_avg_articles")
-            wkly_str = f"{wkly:.1f}" if wkly is not None else "—"
-            buzz_str = f"{buzz:.2f}" if buzz is not None else "—"
-            arts_str = str(arts) if arts is not None else "—"
-            st.caption(
-                f"📈 上周文章数: {arts_str} | 周均: {wkly_str} | Buzz (相对热度): {buzz_str}"
-            )
-            st.warning(
-                "⚠️ Finnhub 情绪分基于自动 NLP 分析的新闻头条, 可能误读上下文。"
-                "情绪分数 ≠ 价格预测, 不构成投资建议。"
-            )
-
-    # === 内幕交易 ===
-    with fh_tabs[2]:
-        with st.spinner("获取内幕交易..."):
+        with st.spinner("获取内幕交易 (SEC Form 4)..."):
             ins = fh_insider_tx(sym)
         if not ins["ok"]:
             st.warning(f"无法获取内幕数据: {ins['error']}")
-        elif not ins["data"]:
-            st.info("无内幕交易记录 (或公司无 SEC Form 4 报告)")
         else:
-            tx_code_zh = {
-                "P": "买入 (Purchase)", "S": "卖出 (Sale)",
-                "A": "授予 (Award)", "M": "期权行权 (Option Exercise)",
-                "G": "赠予 (Gift)", "F": "缴税转让 (Tax Withholding)",
-                "D": "递交给发行人 (Disposition to Issuer)",
-            }
-            rows = []
-            for t in ins["data"]:
-                code = t.get("transactionCode", "")
-                rows.append({
-                    "申报日": t.get("filingDate", ""),
-                    "交易日": t.get("transactionDate", ""),
-                    "姓名": t.get("name", ""),
-                    "代码": f"{code} ({tx_code_zh.get(code, '其他')})",
-                    "股数变动": t.get("change") if t.get("change") is not None else t.get("share"),
-                    "价格": f"${t['transactionPrice']:.2f}" if t.get("transactionPrice") else "—",
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption("数据来源: SEC Form 4 通过 Finnhub 聚合。**只是历史申报, 不预示后市方向**。")
+            data = ins["data"]
+            txs = data.get("transactions", []) if isinstance(data, dict) else []
+            summ = data.get("summary", {}) if isinstance(data, dict) else {}
+            if not txs:
+                st.info("最近 180 天无内幕交易记录")
+            else:
+                cs1, cs2, cs3, cs4 = st.columns(4)
+                cs1.metric("交易笔数 (180d)", summ.get("n", 0))
+                cs2.metric("内幕买入股数",
+                           f"{summ.get('buy_shares', 0):,}")
+                cs3.metric("内幕卖出股数",
+                           f"{summ.get('sell_shares', 0):,}")
+                net = summ.get('net_shares', 0)
+                cs4.metric("净变动",
+                           f"{net:+,}",
+                           "净买入" if net > 0 else "净卖出" if net < 0 else "中性",
+                           delta_color="off")
 
-    # === 分析师评级 ===
-    with fh_tabs[3]:
+                rows = []
+                for t in txs:
+                    code = t.get("transactionCode") or ""
+                    price = t.get("transactionPrice")
+                    rows.append({
+                        "申报日": t.get("filingDate", ""),
+                        "交易日": t.get("transactionDate", ""),
+                        "姓名": t.get("name", ""),
+                        "代码": f"{code} ({_INSIDER_CODE_ZH.get(code, '其他')})",
+                        "股数变动": t.get("change") if t.get("change") is not None else t.get("share"),
+                        "价格": f"${price:.2f}" if isinstance(price, (int, float)) else "—",
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                st.caption("数据来源: SEC Form 4 通过 Finnhub 聚合。**只是历史申报, 不预示后市方向**。")
+
+    # === 3. 分析师评级 ===
+    with fh_tabs[2]:
         with st.spinner("获取分析师评级..."):
             rec = fh_recommendations(sym)
         if not rec["ok"]:
@@ -461,6 +485,19 @@ def render_finnhub_section(sym: str):
                 "⚠️ **以下是华尔街第三方机构的评级汇总, 不是本工具的建议**。"
                 "本工具不推荐买入/卖出, 评级仅作信息展示。"
             )
+            # 最新一行的快照
+            latest = rec["data"][0] if rec["data"] else None
+            if latest:
+                total = (latest["strongBuy"] + latest["buy"] + latest["hold"]
+                         + latest["sell"] + latest["strongSell"])
+                bullish_pct = ((latest["strongBuy"] + latest["buy"]) / max(1, total)) * 100
+                bearish_pct = ((latest["sell"] + latest["strongSell"]) / max(1, total)) * 100
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                rc1.metric("最新月份", latest["period"])
+                rc2.metric("分析师总数", total)
+                rc3.metric("看多 % (强买+买)", f"{bullish_pct:.0f}%")
+                rc4.metric("看空 % (卖+强卖)", f"{bearish_pct:.0f}%")
+
             rows = []
             for r in rec["data"]:
                 total = r["strongBuy"] + r["buy"] + r["hold"] + r["sell"] + r["strongSell"]
@@ -475,25 +512,122 @@ def render_finnhub_section(sym: str):
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # === 财报惊喜 ===
-    with fh_tabs[4]:
-        with st.spinner("获取财报历史..."):
-            er = fh_earnings_surprise(sym)
-        if not er["ok"]:
-            st.warning(f"无法获取财报数据: {er['error']}")
-        elif not er["data"]:
-            st.info("无财报数据")
+    # === 4. 财报日历 + 惊喜 ===
+    with fh_tabs[3]:
+        with st.spinner("获取财报日历..."):
+            ec = fh_earnings_cal(sym)
+        if not ec["ok"]:
+            st.warning(f"无法获取财报数据: {ec['error']}")
         else:
-            rows = []
-            for e in er["data"]:
-                surp = e.get("surprisePercent")
-                rows.append({
-                    "季度": e.get("period", ""),
-                    "实际 EPS": f"${e['actual']:.2f}" if e.get("actual") is not None else "—",
-                    "预期 EPS": f"${e['estimate']:.2f}" if e.get("estimate") is not None else "—",
-                    "惊喜 %": f"{surp:+.1f}%" if surp is not None else "—",
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            data = ec["data"]
+            upcoming = data.get("upcoming", []) if isinstance(data, dict) else []
+            historical = data.get("historical", []) if isinstance(data, dict) else []
+
+            if upcoming:
+                st.markdown("#### 📆 即将到来的财报")
+                up_rows = []
+                for u in upcoming:
+                    up_rows.append({
+                        "日期": u.get("date", ""),
+                        "时段": {"bmo": "开盘前", "amc": "收盘后"}.get(u.get("hour", ""), u.get("hour", "")),
+                        "季度": f"Q{u.get('quarter')}" if u.get("quarter") else "",
+                        "年度": u.get("year") or "",
+                        "预期 EPS": f"${u['epsEstimate']:.2f}" if isinstance(u.get("epsEstimate"), (int, float)) else "—",
+                        "预期营收": f"${u['revenueEstimate']/1e9:.2f}B" if isinstance(u.get("revenueEstimate"), (int, float)) else "—",
+                    })
+                st.dataframe(pd.DataFrame(up_rows), use_container_width=True, hide_index=True)
+
+            if historical:
+                st.markdown("#### 📜 历史财报 (实际 vs 预期)")
+                # 惊喜统计
+                surprises = [h["surprise_pct"] for h in historical
+                             if h.get("surprise_pct") is not None]
+                if surprises:
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.metric("近 N 季平均惊喜",
+                               f"{sum(surprises)/len(surprises):+.1f}%",
+                               help="(实际 EPS − 预期 EPS) / |预期 EPS|")
+                    beat_count = sum(1 for s in surprises if s > 0)
+                    sc2.metric("超预期次数",
+                               f"{beat_count} / {len(surprises)}")
+                    sc3.metric("最近 1 次惊喜",
+                               f"{surprises[0]:+.1f}%")
+
+                hist_rows = []
+                for h in historical:
+                    surp = h.get("surprise_pct")
+                    eps_a = h.get("epsActual")
+                    eps_e = h.get("epsEstimate")
+                    rev_a = h.get("revenueActual")
+                    rev_e = h.get("revenueEstimate")
+                    hist_rows.append({
+                        "日期": h.get("date", ""),
+                        "季度": f"Q{h.get('quarter')}" if h.get("quarter") else "",
+                        "实际 EPS": f"${eps_a:.2f}" if isinstance(eps_a, (int, float)) else "—",
+                        "预期 EPS": f"${eps_e:.2f}" if isinstance(eps_e, (int, float)) else "—",
+                        "惊喜 %": f"{surp:+.1f}%" if isinstance(surp, (int, float)) else "—",
+                        "实际营收": f"${rev_a/1e9:.2f}B" if isinstance(rev_a, (int, float)) else "—",
+                        "预期营收": f"${rev_e/1e9:.2f}B" if isinstance(rev_e, (int, float)) else "—",
+                    })
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+            if not upcoming and not historical:
+                st.info("无财报记录")
+
+    # === 5. 基础财务指标 ===
+    with fh_tabs[4]:
+        with st.spinner("获取基础财务指标..."):
+            bf = fh_basic_financials(sym)
+        if not bf["ok"]:
+            st.warning(f"无法获取财务数据: {bf['error']}")
+        else:
+            f = bf["data"]
+            st.markdown("#### 估值 (Valuation)")
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("P/E (TTM)",
+                      f"{f['pe_ttm']:.2f}" if f.get("pe_ttm") is not None else "—")
+            v2.metric("P/B",
+                      f"{f['pb']:.2f}" if f.get("pb") is not None else "—")
+            v3.metric("P/S (TTM)",
+                      f"{f['ps_ttm']:.2f}" if f.get("ps_ttm") is not None else "—")
+            v4.metric("Beta",
+                      f"{f['beta']:.2f}" if f.get("beta") is not None else "—")
+
+            st.markdown("#### 盈利能力 (Profitability)")
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("ROE (TTM)",
+                      f"{f['roe_ttm']:.1f}%" if f.get("roe_ttm") is not None else "—")
+            p2.metric("ROA (TTM)",
+                      f"{f['roa_ttm']:.1f}%" if f.get("roa_ttm") is not None else "—")
+            p3.metric("毛利率 (TTM)",
+                      f"{f['gross_margin_ttm']:.1f}%" if f.get("gross_margin_ttm") is not None else "—")
+            p4.metric("净利率 (TTM)",
+                      f"{f['net_margin_ttm']:.1f}%" if f.get("net_margin_ttm") is not None else "—")
+
+            st.markdown("#### 成长性 (Growth)")
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("营收 3 年增长",
+                      f"{f['revenue_growth_3y']:+.1f}%" if f.get("revenue_growth_3y") is not None else "—")
+            g2.metric("营收 5 年增长",
+                      f"{f['revenue_growth_5y']:+.1f}%" if f.get("revenue_growth_5y") is not None else "—")
+            g3.metric("EPS 3 年增长",
+                      f"{f['eps_growth_3y']:+.1f}%" if f.get("eps_growth_3y") is not None else "—")
+            g4.metric("EPS 5 年增长",
+                      f"{f['eps_growth_5y']:+.1f}%" if f.get("eps_growth_5y") is not None else "—")
+
+            st.markdown("#### 偿债能力 + 价格区间")
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("流动比率",
+                      f"{f['current_ratio']:.2f}" if f.get("current_ratio") is not None else "—")
+            d2.metric("负债权益比",
+                      f"{f['debt_to_equity']:.2f}" if f.get("debt_to_equity") is not None else "—")
+            d3.metric("52 周高",
+                      f"${f['52_week_high']:.2f}" if f.get("52_week_high") is not None else "—")
+            d4.metric("52 周低",
+                      f"${f['52_week_low']:.2f}" if f.get("52_week_low") is not None else "—")
+
+            if f.get("dividend_yield_ttm") is not None:
+                st.caption(f"💰 股息率 (TTM): {f['dividend_yield_ttm']:.2f}%")
 
 
 @st.cache_data(ttl=3600)
@@ -579,7 +713,7 @@ with tab1:
     else:
         days = period_to_days[period]
         auto_window = False
-    st.caption(f"📡 数据源: yfinance (延迟 15-20 分钟) | 最后刷新: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"📡 数据源: yfinance (延迟 15-20 分钟) | 最后刷新: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
 
     # === 符号搜索 (帮用户找代码) ===
     with st.expander("🔍 不知道代码? 在这里搜索 (Search by company name)"):
@@ -1007,6 +1141,116 @@ with tab1:
                                 "regime change 时失效\n\n"
                                 "• **不构成投资建议, 不预测真实未来价格**"
                             )
+                            # Cache for AI section
+                            st.session_state["_last_kronos"] = chronos_out
+                            st.session_state["_last_kronos_sym"] = sym
+                            st.session_state["_last_kronos_horizon"] = ai_horizon
+
+                # Compute detected signals here so AI section can use them
+                detected = []
+                for sig_col in SIGNAL_STATS.keys():
+                    if sig_col in df_full.columns:
+                        v = last.get(sig_col)
+                        if isinstance(v, (bool, np.bool_)) and bool(v):
+                            detected.append(sig_col)
+                detected.sort(key=lambda s: (
+                    not SIGNAL_STATS[s].get("oos_significant", False),
+                    -abs(SIGNAL_STATS[s].get("alpha_10d", 0))
+                ))
+
+                # === AI 解读 (OpenAI gpt-4o-mini) ===
+                st.markdown("---")
+                st.markdown("## 🤖 AI 技术面解读 (OpenAI gpt-4o-mini)")
+                if not ai_analysis.is_available():
+                    st.info(
+                        f"🔑 **AI 解读未启用** — {ai_analysis.get_unavailable_reason()}\n\n"
+                        "启用方法: \n"
+                        "1. 在 https://platform.openai.com 创建 API key (按 token 付费, "
+                        "gpt-4o-mini 极便宜, 每次分析约 $0.001)\n"
+                        "2. 设置环境变量 `OPENAI_API_KEY=<your-key>` 或在 HuggingFace Space "
+                        "→ Settings → Variables and secrets 添加 `OPENAI_API_KEY`\n"
+                        "3. 重启应用"
+                    )
+                else:
+                    ai_help_col1, ai_help_col2 = st.columns([3, 1])
+                    with ai_help_col1:
+                        st.caption(
+                            "点击下方按钮发送一次 OpenAI 请求, "
+                            "AI 会基于上方所有指标 + 共振 + 信号 + 概率预测给出中文技术面解读。"
+                            "每次按钮点击触发一次新请求 (有 API 调用成本, 约 $0.001/次)。"
+                        )
+                    with ai_help_col2:
+                        run_ai_btn = st.button("🤖 AI 解读", type="primary",
+                                               key="t1_ai_chat_btn",
+                                               use_container_width=True)
+
+                    if run_ai_btn:
+                        # 装配 context
+                        divs_for_ai = []
+                        if last.get("cd_bullish_div"): divs_for_ai.append("MACD DIF 底背离")
+                        if last.get("cd_bearish_div"): divs_for_ai.append("MACD DIF 顶背离")
+                        if last.get("cd_hist_bullish_div"): divs_for_ai.append("MACD 柱状底背离")
+                        if last.get("cd_hist_bearish_div"): divs_for_ai.append("MACD 柱状顶背离")
+                        if last.get("rsi_bullish_div"): divs_for_ai.append("RSI 底背离")
+                        if last.get("rsi_bearish_div"): divs_for_ai.append("RSI 顶背离")
+                        if last.get("obv_bullish_div"): divs_for_ai.append("OBV 底背离")
+                        if last.get("obv_bearish_div"): divs_for_ai.append("OBV 顶背离")
+
+                        indicators_ctx = {
+                            "rsi": last.get("rsi") if pd.notna(last.get("rsi")) else None,
+                            "cci": last.get("cci") if pd.notna(last.get("cci")) else None,
+                            "williams_r": last.get("williams_r") if pd.notna(last.get("williams_r")) else None,
+                            "atr": last.get("atr") if pd.notna(last.get("atr")) else None,
+                            "vwap": last.get("vwap") if pd.notna(last.get("vwap")) else None,
+                            "cmf": last.get("cmf") if pd.notna(last.get("cmf")) else None,
+                            "supertrend_bullish": bool(last.get("supertrend_bullish")),
+                            "supertrend_bearish": bool(last.get("supertrend_bearish")),
+                            "ichimoku_above_cloud": bool(last.get("ichimoku_above_cloud")),
+                            "ichimoku_below_cloud": bool(last.get("ichimoku_below_cloud")),
+                            "nx_bull_zone": bool(last.get("nx_bull_zone")),
+                            "nx_bear_zone": bool(last.get("nx_bear_zone")),
+                            "above_vwap": bool(last.get("above_vwap")),
+                            "below_vwap": bool(last.get("below_vwap")),
+                            "above_sma200": bool(last.get("above_sma200")),
+                            "squeeze_on": bool(last.get("squeeze_on")),
+                            "squeeze_fired_up": bool(last.get("squeeze_fired_up")),
+                            "squeeze_fired_dn": bool(last.get("squeeze_fired_dn")),
+                        }
+
+                        kronos_for_ai = None
+                        if (st.session_state.get("_last_kronos_sym") == sym and
+                                st.session_state.get("_last_kronos") and
+                                st.session_state["_last_kronos"].get("ok")):
+                            kronos_for_ai = st.session_state["_last_kronos"]
+
+                        ai_ctx = {
+                            "symbol": sym,
+                            "price": float(last["close"]),
+                            "change_pct": float(change_pct),
+                            "confluence": conf,
+                            "indicators": indicators_ctx,
+                            "signals": [zh_label(s) for s in detected[:40]],
+                            "divergences": divs_for_ai,
+                            "kronos": kronos_for_ai,
+                            "conformal": pf if pf.get("ok") else None,
+                        }
+
+                        with st.spinner("🧠 OpenAI 推理中 (gpt-4o-mini)..."):
+                            ai_result = ai_analysis.analyze(ai_ctx, model="gpt-4o-mini")
+
+                        if not ai_result["ok"]:
+                            st.error(f"❌ AI 解读失败: {ai_result['error']}")
+                        else:
+                            with st.chat_message("assistant", avatar="🤖"):
+                                st.markdown(ai_result["answer"])
+                                st.markdown("---")
+                                st.caption(
+                                    f"模型: `{ai_result.get('model', 'gpt-4o-mini')}` | "
+                                    f"Tokens: prompt {ai_result['usage'].get('prompt_tokens')} / "
+                                    f"completion {ai_result['usage'].get('completion_tokens')} / "
+                                    f"total {ai_result['usage'].get('total_tokens')}"
+                                )
+                            st.error("⚠️ 以上为模型分析, 不构成投资建议")
 
                 # === 当前触发的信号 ===
                 st.markdown("---")
@@ -1016,19 +1260,8 @@ with tab1:
                     "**历史频率不是预测**。"
                 )
 
-                detected = []
-                for sig_col in SIGNAL_STATS.keys():
-                    if sig_col in disp.columns:
-                        val = last.get(sig_col)
-                        if isinstance(val, (bool, np.bool_)) and bool(val):
-                            detected.append(sig_col)
-
+                # 'detected' was computed above (before the AI section) and already sorted
                 if detected:
-                    # 排序: 优先 oos_significant=True 的, 然后按 |alpha|
-                    detected.sort(key=lambda s: (
-                        not SIGNAL_STATS[s].get("oos_significant", False),
-                        -abs(SIGNAL_STATS[s].get("alpha_10d", 0))
-                    ))
                     for sig_col in detected:
                         stat = SIGNAL_STATS[sig_col]
                         with st.container():

@@ -30,6 +30,7 @@ import numpy as np
 
 _MODEL_CACHE = {}
 _IMPORT_ERROR = None
+_LOAD_ERROR = None  # 最近一次模型下载/加载失败的原因 (HF hub 404/403, 磁盘满, ...)
 
 
 def _try_import():
@@ -67,24 +68,48 @@ def get_import_error() -> str | None:
 
 def _load_pipeline(model_name: str = "amazon/chronos-bolt-tiny"):
     """
-    加载并缓存 Chronos pipeline。
-    Chronos-Bolt 系列有 native quantile head, 推断快。
+    加载并缓存 Chronos pipeline。任何下载/加载错误都被捕获 → 返回 None,
+    原因写到 _LOAD_ERROR 给 UI 展示。永不让上层抛异常。
+
+    可能的失败:
+      - 无网络 (HF Hub 不可达, 403/404, 超时)
+      - HuggingFace 仓库不存在
+      - 本地磁盘满
+      - torch 不兼容 (旧版 / GPU only build)
     """
+    global _LOAD_ERROR
     if model_name in _MODEL_CACHE:
         return _MODEL_CACHE[model_name]
     if not _try_import():
         return None
 
-    import torch
-    from chronos import BaseChronosPipeline
+    try:
+        import torch
+        from chronos import BaseChronosPipeline
+        pipeline = BaseChronosPipeline.from_pretrained(
+            model_name,
+            device_map="cpu",
+            torch_dtype=torch.float32,
+        )
+        _MODEL_CACHE[model_name] = pipeline
+        _LOAD_ERROR = None
+        return pipeline
+    except Exception as e:
+        # 通用兜底 — HFHubHTTPError, OSError, ConnectionError, RepositoryNotFoundError 等
+        _LOAD_ERROR = (
+            f"模型加载失败 ({type(e).__name__}): {str(e)[:300]}\n\n"
+            f"常见原因: \n"
+            f"  - HuggingFace Hub 不可达 (网络/代理/区域限制)\n"
+            f"  - 模型仓库 '{model_name}' 不存在或需要 token\n"
+            f"  - HuggingFace Spaces 免费 CPU 实例内存不足 (~16GB), 此模型 ~40MB 通常够\n"
+            f"  - torch 版本不兼容 (需要 >=2.1)"
+        )
+        return None
 
-    pipeline = BaseChronosPipeline.from_pretrained(
-        model_name,
-        device_map="cpu",
-        torch_dtype=torch.float32,
-    )
-    _MODEL_CACHE[model_name] = pipeline
-    return pipeline
+
+def get_load_error() -> str | None:
+    """返回最近一次模型加载失败的描述, 供 UI 展示."""
+    return _LOAD_ERROR
 
 
 # =============================================================================
@@ -131,7 +156,10 @@ def predict_distribution(
 
     pipeline = _load_pipeline(model_name)
     if pipeline is None:
-        return {"ok": False, "error": get_import_error()}
+        # _LOAD_ERROR set by _load_pipeline if it tried and failed
+        load_err = get_load_error()
+        imp_err = get_import_error()
+        return {"ok": False, "error": load_err or imp_err or "pipeline load failed"}
 
     # 切片到 context_length
     ctx = np.asarray(close, dtype=float)[-context_length:]
