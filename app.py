@@ -26,6 +26,7 @@ from historical_stats import SIGNAL_STATS, BASELINE_10D, format_freq_text, stabi
 from new_indicators import compute_new_indicators
 from confluence import compute_confluence_summary
 from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
+import finnhub_data
 
 st.set_page_config(
     page_title="技术指标频率分析",
@@ -306,6 +307,191 @@ def stability_badge_zh(stat):
     oos = stat.get("oos_significant", False)
     o = "近 6 年仍显著 p<0.05" if oos else "近 6 年不显著 p>=0.05"
     return f"{d}; {o}"
+
+
+@st.cache_data(ttl=900)
+def fh_company_news(symbol: str, days_back: int = 7):
+    return finnhub_data.get_company_news(symbol, days_back=days_back, limit=20)
+
+
+@st.cache_data(ttl=1800)
+def fh_news_sentiment(symbol: str):
+    return finnhub_data.get_news_sentiment(symbol)
+
+
+@st.cache_data(ttl=3600)
+def fh_insider_tx(symbol: str):
+    return finnhub_data.get_insider_transactions(symbol, limit=20)
+
+
+@st.cache_data(ttl=3600)
+def fh_recommendations(symbol: str):
+    return finnhub_data.get_recommendations(symbol)
+
+
+@st.cache_data(ttl=3600)
+def fh_earnings_surprise(symbol: str):
+    return finnhub_data.get_earnings_surprise(symbol)
+
+
+def render_finnhub_section(sym: str):
+    """渲染 Finnhub 数据面板。如未配置 API key, 显示如何获取的提示。"""
+    api_key = finnhub_data.get_api_key()
+    st.markdown("---")
+    st.markdown("## 📰 Finnhub 数据 (新闻 / 情绪 / 内幕 / 评级)")
+
+    if not api_key:
+        st.info(
+            "🔑 **未配置 Finnhub API key** — 此面板提供新闻、情绪、内幕交易、分析师评级数据。\n\n"
+            "获取免费 key (60 次/分钟, 永久免费):\n"
+            "1. 访问 https://finnhub.io 注册账户\n"
+            "2. 在 Dashboard 复制 API key\n"
+            "3. 设置环境变量: `export FINNHUB_API_KEY=<your-key>` 或在 HuggingFace Space "
+            "Settings → Variables and secrets 添加 `FINNHUB_API_KEY`\n"
+            "4. 重启应用"
+        )
+        return
+
+    st.caption(
+        "🔌 数据由 Finnhub.io 提供 (免费版 60 次/分钟)。"
+        "**分析师推荐是第三方机构观点, 不是本工具的建议**。"
+    )
+
+    fh_tabs = st.tabs(["📰 公司新闻", "📊 新闻情绪", "👤 内幕交易", "🎯 分析师评级", "💰 财报惊喜"])
+
+    # === 公司新闻 ===
+    with fh_tabs[0]:
+        with st.spinner("获取最近 7 天新闻..."):
+            news = fh_company_news(sym, days_back=7)
+        if not news["ok"]:
+            st.warning(f"无法获取新闻: {news['error']}")
+        elif not news["data"]:
+            st.info("最近 7 天无相关新闻。")
+        else:
+            for item in news["data"][:10]:
+                with st.container():
+                    st.markdown(f"**{item['headline']}**")
+                    st.caption(f"📅 {item['datetime']} | 📢 {item['source']} | 🏷️ {item['category']}")
+                    if item["summary"]:
+                        st.write(item["summary"])
+                    if item["url"]:
+                        st.caption(f"🔗 [原文链接]({item['url']})")
+                    st.markdown("---")
+
+    # === 新闻情绪 ===
+    with fh_tabs[1]:
+        with st.spinner("获取新闻情绪..."):
+            sent = fh_news_sentiment(sym)
+        if not sent["ok"]:
+            st.warning(f"无法获取情绪数据: {sent['error']}")
+        elif not sent["data"]:
+            st.info("无情绪数据")
+        else:
+            d = sent["data"]
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            score = d.get("company_news_score")
+            sc1.metric("公司新闻情绪分 (0-1)",
+                       f"{score:.2f}" if score is not None else "—",
+                       help="越接近 1 = 整体新闻越正面 (Finnhub 计算, 仅供参考)")
+            sector_avg = d.get("sector_avg_news_score")
+            sc2.metric("行业平均",
+                       f"{sector_avg:.2f}" if sector_avg is not None else "—")
+            bull = d.get("bullish_pct")
+            sc3.metric("看涨新闻占比",
+                       f"{bull*100:.1f}%" if bull is not None else "—")
+            bear = d.get("bearish_pct")
+            sc4.metric("看跌新闻占比",
+                       f"{bear*100:.1f}%" if bear is not None else "—")
+
+            buzz = d.get("buzz")
+            arts = d.get("articles_last_week")
+            wkly = d.get("weekly_avg_articles")
+            wkly_str = f"{wkly:.1f}" if wkly is not None else "—"
+            buzz_str = f"{buzz:.2f}" if buzz is not None else "—"
+            arts_str = str(arts) if arts is not None else "—"
+            st.caption(
+                f"📈 上周文章数: {arts_str} | 周均: {wkly_str} | Buzz (相对热度): {buzz_str}"
+            )
+            st.warning(
+                "⚠️ Finnhub 情绪分基于自动 NLP 分析的新闻头条, 可能误读上下文。"
+                "情绪分数 ≠ 价格预测, 不构成投资建议。"
+            )
+
+    # === 内幕交易 ===
+    with fh_tabs[2]:
+        with st.spinner("获取内幕交易..."):
+            ins = fh_insider_tx(sym)
+        if not ins["ok"]:
+            st.warning(f"无法获取内幕数据: {ins['error']}")
+        elif not ins["data"]:
+            st.info("无内幕交易记录 (或公司无 SEC Form 4 报告)")
+        else:
+            tx_code_zh = {
+                "P": "买入 (Purchase)", "S": "卖出 (Sale)",
+                "A": "授予 (Award)", "M": "期权行权 (Option Exercise)",
+                "G": "赠予 (Gift)", "F": "缴税转让 (Tax Withholding)",
+                "D": "递交给发行人 (Disposition to Issuer)",
+            }
+            rows = []
+            for t in ins["data"]:
+                code = t.get("transactionCode", "")
+                rows.append({
+                    "申报日": t.get("filingDate", ""),
+                    "交易日": t.get("transactionDate", ""),
+                    "姓名": t.get("name", ""),
+                    "代码": f"{code} ({tx_code_zh.get(code, '其他')})",
+                    "股数变动": t.get("change") if t.get("change") is not None else t.get("share"),
+                    "价格": f"${t['transactionPrice']:.2f}" if t.get("transactionPrice") else "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption("数据来源: SEC Form 4 通过 Finnhub 聚合。**只是历史申报, 不预示后市方向**。")
+
+    # === 分析师评级 ===
+    with fh_tabs[3]:
+        with st.spinner("获取分析师评级..."):
+            rec = fh_recommendations(sym)
+        if not rec["ok"]:
+            st.warning(f"无法获取评级: {rec['error']}")
+        elif not rec["data"]:
+            st.info("无分析师评级数据")
+        else:
+            st.error(
+                "⚠️ **以下是华尔街第三方机构的评级汇总, 不是本工具的建议**。"
+                "本工具不推荐买入/卖出, 评级仅作信息展示。"
+            )
+            rows = []
+            for r in rec["data"]:
+                total = r["strongBuy"] + r["buy"] + r["hold"] + r["sell"] + r["strongSell"]
+                rows.append({
+                    "月份": r["period"],
+                    "强烈买入": r["strongBuy"],
+                    "买入": r["buy"],
+                    "持有": r["hold"],
+                    "卖出": r["sell"],
+                    "强烈卖出": r["strongSell"],
+                    "总计": total,
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # === 财报惊喜 ===
+    with fh_tabs[4]:
+        with st.spinner("获取财报历史..."):
+            er = fh_earnings_surprise(sym)
+        if not er["ok"]:
+            st.warning(f"无法获取财报数据: {er['error']}")
+        elif not er["data"]:
+            st.info("无财报数据")
+        else:
+            rows = []
+            for e in er["data"]:
+                surp = e.get("surprisePercent")
+                rows.append({
+                    "季度": e.get("period", ""),
+                    "实际 EPS": f"${e['actual']:.2f}" if e.get("actual") is not None else "—",
+                    "预期 EPS": f"${e['estimate']:.2f}" if e.get("estimate") is not None else "—",
+                    "惊喜 %": f"{surp:+.1f}%" if surp is not None else "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 @st.cache_data(ttl=3600)
@@ -731,6 +917,9 @@ with tab1:
                 st.plotly_chart(fig, use_container_width=True, theme=None,
                                 config={"scrollZoom": True, "displaylogo": False,
                                         "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
+
+                # === Finnhub 数据面板 (新闻 / 情绪 / 内幕 / 评级) ===
+                render_finnhub_section(sym)
 
                 # === 参考表 ===
                 st.markdown("---")
