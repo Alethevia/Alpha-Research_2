@@ -27,7 +27,8 @@ from new_indicators import compute_new_indicators
 from confluence import compute_confluence_summary, find_optimal_window
 from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
 import finnhub_data
-from conformal import probability_forecast
+from conformal import probability_forecast, conformalize_external_forecaster
+import kronos_predict
 
 st.set_page_config(
     page_title="技术指标频率分析",
@@ -894,6 +895,118 @@ with tab1:
                         "• 校准基于过去 100 个滚动窗口, 无法预知 regime change / 黑天鹅事件\n\n"
                         "• **不构成投资建议, 不预测真实未来价格**, 仅供方法论展示"
                     )
+
+                # === AI 概率预测 (Chronos / Kronos, 实验性) ===
+                st.markdown("---")
+                st.markdown("## 🧠 AI 概率预测 (Chronos-Bolt-Tiny + Conformal)")
+                st.caption(
+                    "用 Amazon Chronos-Bolt-Tiny (~9M 参数, Apache 2.0) 预测未来 OHLC, "
+                    "原生输出 5 分位数; 同时叠加 Split Conformal 校准提供保证覆盖率的区间。"
+                    "**首次运行需下载模型 (~40MB), CPU 推理 5-30 秒**。"
+                )
+                if not kronos_predict.is_available():
+                    st.warning(
+                        "🔧 AI 预测未启用 — 需要安装 ML 依赖:\n\n"
+                        f"```\n{kronos_predict.get_import_error()}\n```\n\n"
+                        "在 HuggingFace Spaces, 把 `chronos-forecasting` 和 "
+                        "`torch --index-url https://download.pytorch.org/whl/cpu` 加到 requirements.txt 即可。"
+                    )
+                else:
+                    ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
+                    with ai_col1:
+                        ai_horizon = st.selectbox("AI 预测期", [5, 10, 20], index=1, key="t1_ai_h")
+                    with ai_col2:
+                        ai_with_conformal = st.checkbox("叠加 Conformal 校准", value=True, key="t1_ai_conf",
+                                                        help="勾选: 在 AI 预测上滚动校准 50 个窗口, 给出 90% CI (慢但稳)")
+                    with ai_col3:
+                        st.write("")
+                        st.write("")
+                        run_ai = st.button("🚀 运行 AI 预测", type="primary", key="t1_ai_btn")
+
+                    if run_ai:
+                        close_array = df_full["close"].astype(float).values
+                        # Step 1: 原生 Chronos 概率分布
+                        with st.spinner("Chronos 推理中 (首次需下载模型, 请耐心)..."):
+                            chronos_out = kronos_predict.predict_distribution(
+                                close_array, horizon=ai_horizon
+                            )
+                        if not chronos_out["ok"]:
+                            st.error(f"AI 预测失败: {chronos_out['error']}")
+                        else:
+                            st.markdown(f"### 🤖 Chronos 原生分布 (模型: `{chronos_out['model']}`)")
+                            ac1, ac2, ac3, ac4 = st.columns(4)
+                            ac1.metric(f"中位数 ({ai_horizon}d)",
+                                       f"{chronos_out['point_pct']:+.2f}%",
+                                       delta_color="off")
+                            qpct = chronos_out["quantiles_pct"]
+                            if 0.1 in qpct and 0.9 in qpct:
+                                ac2.metric("80% 分位数区间",
+                                           f"[{qpct[0.1]:+.1f}%, {qpct[0.9]:+.1f}%]")
+                            if chronos_out.get("p_up_native") is not None:
+                                ac3.metric("AI: P(上涨)",
+                                           f"{chronos_out['p_up_native']*100:.1f}%",
+                                           f"基于 {chronos_out['n_samples']} 样本"
+                                           if chronos_out['n_samples'] else "近似",
+                                           delta_color="off")
+                            if chronos_out.get("p_up_5pct_native") is not None and chronos_out.get("p_dn_5pct_native") is not None:
+                                ac4.metric("AI: P(>+5%) / P(<-5%)",
+                                           f"{chronos_out['p_up_5pct_native']*100:.1f}% / "
+                                           f"{chronos_out['p_dn_5pct_native']*100:.1f}%")
+
+                            # 显示完整分位数
+                            if qpct:
+                                qrows = [{"分位数": f"P{int(q*100)}",
+                                          "log return": chronos_out["quantiles_log"].get(q),
+                                          "% return": f"{qpct.get(q):+.2f}%" if qpct.get(q) is not None else "—"}
+                                         for q in sorted(qpct.keys())]
+                                st.dataframe(pd.DataFrame(qrows), use_container_width=True, hide_index=True)
+
+                            # Step 2: 可选 Conformal 校准
+                            if ai_with_conformal:
+                                st.markdown("### 🎯 + Conformal 校准 (90% CI)")
+                                with st.spinner(
+                                    "滚动校准 (会运行 ~50 次 Chronos 推理, 可能需要 1-3 分钟)..."
+                                ):
+                                    conf_out = conformalize_external_forecaster(
+                                        df_full,
+                                        kronos_predict.chronos_point_forecaster,
+                                        horizon=ai_horizon,
+                                        alpha=0.10,
+                                        cal_size=50,
+                                    )
+                                if not conf_out["ok"]:
+                                    st.warning(f"Conformal 校准失败: {conf_out['error']}")
+                                else:
+                                    cc1, cc2, cc3, cc4 = st.columns(4)
+                                    cc1.metric("点预测 (AI)",
+                                               f"{conf_out['point_pct']:+.2f}%",
+                                               delta_color="off")
+                                    cc2.metric("90% Conformal CI",
+                                               f"[{conf_out['lower_pct']:+.1f}%, {conf_out['upper_pct']:+.1f}%]")
+                                    cc3.metric("Conformal P(上涨)",
+                                               f"{conf_out['p_up']*100:.1f}%",
+                                               f"基线 {conf_out['naive_p_up_baseline']*100:.1f}%",
+                                               delta_color="off")
+                                    cc4.metric("校准覆盖",
+                                               f"{conf_out['calibration_coverage']*100:.1f}%",
+                                               f"目标 90.0%",
+                                               delta_color="off")
+                                    st.caption(
+                                        f"校准集 n={conf_out['calibration_n']}; "
+                                        f"方法: {conf_out['method']}"
+                                    )
+
+                            st.error(
+                                "⚠️ **AI 预测重要免责**:\n\n"
+                                "• Chronos-Bolt 是通用时间序列模型, *未在金融数据上特调*, "
+                                "对股票预测精度有限\n\n"
+                                "• 模型使用过去 256 根 bar 作为上下文, "
+                                "无法预知财报、宏观、地缘事件\n\n"
+                                "• 概率分布反映模型的不确定性, *不是真实未来概率*\n\n"
+                                "• Conformal 校准只在数据分布稳定时给出有效覆盖, "
+                                "regime change 时失效\n\n"
+                                "• **不构成投资建议, 不预测真实未来价格**"
+                            )
 
                 # === 当前触发的信号 ===
                 st.markdown("---")

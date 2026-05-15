@@ -4,3 +4,9 @@ numpy>=1.24
 yfinance>=0.2
 scipy>=1.10
 plotly>=5.18
+
+# === Optional: AI probability prediction (Chronos / Kronos) ===
+# Adds ~1GB to image size. Comment these two lines to disable AI features
+# (the app will detect missing deps and hide the AI prediction section).
+chronos-forecasting>=1.5
+torch>=2.1
