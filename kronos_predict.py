@@ -140,23 +140,36 @@ def predict_distribution(
         return {"ok": False, "error": f"invalid last close: {last_close}"}
 
     try:
-        # Chronos predict_quantiles 接受 1D tensor (单序列) 或 batch
+        # Chronos predict_quantiles accepts a 1D tensor (single series) or a list/batch
         ctx_tensor = torch.tensor(ctx, dtype=torch.float32)
         # 注意: predict_quantiles 返回的是绝对价格预测 (不是 log return)
         quantile_preds, _mean = pipeline.predict_quantiles(
-            context=ctx_tensor,
+            inputs=ctx_tensor,
             prediction_length=horizon,
             quantile_levels=list(quantile_levels),
         )
-        # quantile_preds shape: (1, horizon, n_quantiles)
+        # quantile_preds shape: (1, horizon, n_quantiles) for single-series input
         qp = quantile_preds.squeeze(0).cpu().numpy()  # (horizon, n_quantiles)
 
-        # 也获取原始样本以估计 P(up); Chronos.predict 返回 (batch, n_samples, horizon)
+        # 也获取原始样本以估计 P(up).
+        # ChronosBolt 是 quantile-head 模型, 没有样本输出; 老 Chronos T5 有.
+        # 任何失败都退化到分位数插值估计.
         try:
-            samples = pipeline.predict(
-                context=ctx_tensor,
+            raw = pipeline.predict(
+                inputs=ctx_tensor,
                 prediction_length=horizon,
-            ).squeeze(0).cpu().numpy()  # (n_samples, horizon)
+            )
+            arr = raw.cpu().numpy() if hasattr(raw, "cpu") else np.asarray(raw)
+            # shape 可能是 (1, n_samples, horizon) 或 (1, horizon, n_quantiles)
+            if arr.ndim == 3 and arr.shape[0] == 1:
+                arr = arr[0]
+            # 我们只在第二维 > n_quantiles 时认为是真正的样本
+            if arr.ndim == 2 and arr.shape[0] >= 10 and arr.shape[1] == horizon:
+                samples = arr  # (n_samples, horizon)
+            elif arr.ndim == 2 and arr.shape[0] == horizon and arr.shape[1] >= 10:
+                samples = arr.T  # 维度颠倒, 转置
+            else:
+                samples = None
         except Exception:
             samples = None
 
