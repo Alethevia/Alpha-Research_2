@@ -24,7 +24,7 @@ from advanced_patterns import detect_all_advanced_patterns
 from extra_patterns import detect_extra_patterns
 from historical_stats import SIGNAL_STATS, BASELINE_10D, format_freq_text, stability_badge
 from new_indicators import compute_new_indicators
-from confluence import compute_confluence_summary
+from confluence import compute_confluence_summary, find_optimal_window
 from plotly_charts import build_main_chart, DEFAULT_OVERLAYS, SUBPLOT_OPTIONS
 import finnhub_data
 from conformal import probability_forecast
@@ -552,18 +552,32 @@ tab1, tab2, tab3 = st.tabs([
 
 # ============== TAB 1: 单股分析 ==============
 with tab1:
-    col1, col2, col3 = st.columns([2, 1, 1])
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     with col1:
         symbol_input = st.text_input("股票代码", value="AAPL", key="t1_sym",
                                       placeholder="例如: AAPL, TSLA, SPY, BABA")
     with col2:
-        period = st.selectbox("时间窗口", ["3 个月", "6 个月", "1 年", "2 年"], index=2, key="t1_period")
+        period = st.selectbox("时间窗口",
+                              ["自动 (最稳定)", "1 个月", "2 个月", "3 个月", "6 个月", "1 年", "2 年"],
+                              index=0, key="t1_period")
     with col3:
         st.write("")
         st.write("")
         analyze_btn = st.button("📥 加载数据", type="primary", use_container_width=True, key="t1_btn")
+    with col4:
+        st.write("")
+        st.write("")
+        show_window_diag = st.checkbox("窗口诊断", value=False, key="t1_winddiag",
+                                       help="显示各候选窗口的共振稳定性对比表")
 
-    days = {"3 个月": 90, "6 个月": 180, "1 年": 365, "2 年": 730}[period]
+    period_to_days = {"1 个月": 30, "2 个月": 60, "3 个月": 90,
+                      "6 个月": 180, "1 年": 365, "2 年": 730}
+    if period == "自动 (最稳定)":
+        days = 365  # 暂取最大候选, 数据加载后用 find_optimal_window 重选
+        auto_window = True
+    else:
+        days = period_to_days[period]
+        auto_window = False
     st.caption(f"📡 数据源: yfinance (延迟 15-20 分钟) | 最后刷新: {datetime.now().strftime('%H:%M:%S')}")
 
     # === 符号搜索 (帮用户找代码) ===
@@ -623,6 +637,49 @@ with tab1:
             df_full = detect_all_advanced_patterns(df_full)
             df_full = detect_extra_patterns(df_full)
             df_full = compute_new_indicators(df_full)
+
+            # === Task 4: 自动最优窗口 ===
+            window_diag = None
+            if auto_window:
+                window_diag = find_optimal_window(
+                    df_full,
+                    candidate_windows=(30, 60, 90, 180, 365),
+                )
+                days = window_diag["best_window"]
+                st.success(
+                    f"🤖 自动选择最佳窗口: **{days} 天** — {window_diag['best_reason']}"
+                )
+            elif show_window_diag:
+                window_diag = find_optimal_window(
+                    df_full,
+                    candidate_windows=(30, 60, 90, 180, 365),
+                )
+
+            if window_diag and window_diag["candidates"] and show_window_diag:
+                with st.expander("📊 窗口稳定性诊断 (Window Stability Diagnostics)"):
+                    st.caption(
+                        "比较各候选窗口内 *全部* bar 的共振评分稳定性。"
+                        "符号翻转率 (flip_rate) 越低 → 多空切换越少 → 信号方向越稳定。"
+                        "std 是评分的标准差, 越小波动越小。"
+                    )
+                    rows = []
+                    for c in window_diag["candidates"]:
+                        rows.append({
+                            "窗口 (天)": c["window"],
+                            "Bar 数": c["n_bars"],
+                            "翻转率 %": f"{c['flip_rate']*100:.1f}%",
+                            "符号翻转": c["sign_flips"],
+                            "共振 std": c["std"],
+                            "共振均值": c["mean"],
+                            "最新评分": c["last"],
+                            "极差": c["range"],
+                        })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"🏆 推荐窗口: **{window_diag['best_window']} 天** "
+                        f"— {window_diag['best_reason']}"
+                    )
+
             display_start = end - timedelta(days=days)
             # 修复: display_start 已经是 tz-aware (因为 end 用 datetime.now(timezone.utc))
             # 不能再传 tz="UTC" 参数, 直接 pd.Timestamp() 即可

@@ -382,6 +382,121 @@ def compute_confluence_summary(df_full):
     return compute_overall_score(dimension_scores)
 
 
+def _row_confluence_score(row, df_full=None) -> float:
+    """轻量版: 只返回 -100~+100 的综合评分, 用于历史回放/窗口稳定性评估."""
+    weighted_sum = 0.0
+    dim_scores = compute_dimension_scores(row, df_full)
+    for dim_name, weight in DIMENSION_WEIGHTS.items():
+        if dim_name in dim_scores:
+            weighted_sum += dim_scores[dim_name]["score"] * weight
+    return max(-100, min(100, weighted_sum * 100))
+
+
+def find_optimal_window(
+    df_full,
+    candidate_windows=(30, 60, 90, 180, 365),
+    eval_bars=None,  # 已弃用, 保留入参向后兼容
+):
+    """
+    在多个候选显示窗口上测量共振评分稳定性, 返回最稳定的窗口。
+
+    评估方法 (在每个候选窗口的 *全部* bar 上计算):
+      - std         : 共振评分标准差 (越小 = 越稳)
+      - sign_flips  : 评分穿越 0 的次数 (越少 = 多空切换越少, 信号越一致)
+      - flip_rate   : sign_flips / n_bars (按窗口长度归一化, 公平比较)
+      - mean, last, range : 描述性辅助字段
+
+    选择规则 (排序依据):
+      1) flip_rate 升序 (按时间归一化的方向稳定性, 优先级最高)
+      2) std       升序 (波动小的更直观)
+      3) -window   升序 (打平时偏好 *较长* 窗口, 信息量更多)
+
+    Parameters
+    ----------
+    df_full : DataFrame, 已计算全部指标 (含 timestamp 升序)
+    candidate_windows : iterable[int], 候选窗口天数 (日历日)
+    eval_bars : 已弃用, 忽略
+
+    Returns
+    -------
+    dict:
+      best_window, best_reason, candidates (list of per-window stats)
+    """
+    import pandas as pd
+
+    if df_full is None or df_full.empty or len(df_full) < 30:
+        return {
+            "best_window": max(candidate_windows),
+            "best_reason": "数据不足, 默认最大窗口",
+            "candidates": [],
+        }
+    if "timestamp" not in df_full.columns:
+        return {
+            "best_window": max(candidate_windows),
+            "best_reason": "缺少 timestamp 列",
+            "candidates": [],
+        }
+
+    last_ts = df_full["timestamp"].iloc[-1]
+    max_window = max(candidate_windows)
+    earliest_needed = last_ts - pd.Timedelta(days=max_window)
+
+    # 只对最大候选窗口内的 bar 计算 confluence (避免 O(n_total) 开销)
+    span_mask = df_full["timestamp"] >= earliest_needed
+    spanned = df_full[span_mask].reset_index(drop=True)
+    if len(spanned) < 5:
+        return {
+            "best_window": max(candidate_windows),
+            "best_reason": "窗口内 bar 数太少",
+            "candidates": [],
+        }
+    scores = [_row_confluence_score(spanned.iloc[i], df_full) for i in range(len(spanned))]
+    score_series = pd.Series(scores, index=spanned["timestamp"])
+
+    candidates = []
+    for w in sorted(candidate_windows):
+        window_start = last_ts - pd.Timedelta(days=w)
+        ws = score_series[score_series.index >= window_start]
+        if len(ws) < 5:
+            continue
+        sign_flips = int(((ws > 0).astype(int).diff().abs() > 0).sum())
+        n_bars = int(len(ws))
+        flip_rate = sign_flips / max(1, n_bars - 1)  # 翻转率
+        candidates.append({
+            "window": w,
+            "n_bars": n_bars,
+            "std": round(float(ws.std(ddof=0)), 2),
+            "mean": round(float(ws.mean()), 2),
+            "last": round(float(ws.iloc[-1]), 2),
+            "range": round(float(ws.max() - ws.min()), 2),
+            "sign_flips": sign_flips,
+            "flip_rate": round(flip_rate, 4),
+        })
+
+    if not candidates:
+        return {
+            "best_window": max(candidate_windows),
+            "best_reason": "无候选窗口数据足够",
+            "candidates": [],
+        }
+
+    ranked = sorted(
+        candidates,
+        key=lambda c: (c["flip_rate"], c["std"], -c["window"]),
+    )
+    best = ranked[0]
+    reason = (
+        f"该窗口内方向最稳定 (符号翻转率 {best['flip_rate']*100:.1f}%, "
+        f"std={best['std']}, n_bars={best['n_bars']})。"
+    )
+
+    return {
+        "best_window": best["window"],
+        "best_reason": reason,
+        "candidates": ranked,
+    }
+
+
 # =============================================================================
 # 内部辅助函数
 # =============================================================================
