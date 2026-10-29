@@ -1,0 +1,4 @@
+-r requirements.txt
+gradio>=4
+chronos-forecasting>=1.5
+torch>=2.1

@@ -21,7 +21,7 @@ def add_macd_cross(df, fast=12, slow=26, signal=9):
     df["macd_state"] = np.sign(df["macd_hist"]).fillna(0).astype(int)
     df["macd_gc"] = (df["macd_state"] == 1) & (df["macd_state"].shift(1) <= 0)
     df["macd_dc"] = (df["macd_state"] == -1) & (df["macd_state"].shift(1) >= 0)
-    df.loc[:47, ["macd_gc", "macd_dc", "macd_state"]] = [False, False, 0]
+    df.loc[df.index[:48], ["macd_gc", "macd_dc", "macd_state"]] = [False, False, 0]
     return df
 
 
@@ -42,7 +42,7 @@ def add_ma_cross(df):
     long_above = df["sma50"] > df["sma200"]
     df["ma_long_gc"] = long_above & ~long_above.shift(1).fillna(False).astype(bool)
     df["ma_long_dc"] = ~long_above & long_above.shift(1).fillna(False).astype(bool)
-    df.loc[:200, ["ma_short_gc", "ma_short_dc", "ma_mid_gc", "ma_mid_dc",
+    df.loc[df.index[:201], ["ma_short_gc", "ma_short_dc", "ma_mid_gc", "ma_mid_dc",
                    "ma_long_gc", "ma_long_dc"]] = False
     return df
 
@@ -63,7 +63,7 @@ def add_kdj(df, n=9, m=3):
     # 极值条件: 金叉在超卖区(K<20)更可信; 死叉在超买区(K>80)更可信
     df["kdj_gc_oversold"] = df["kdj_gc"] & (df["kdj_k"] < 30)
     df["kdj_dc_overbought"] = df["kdj_dc"] & (df["kdj_k"] > 70)
-    df.loc[:30, ["kdj_gc", "kdj_dc", "kdj_gc_oversold", "kdj_dc_overbought"]] = False
+    df.loc[df.index[:31], ["kdj_gc", "kdj_dc", "kdj_gc_oversold", "kdj_dc_overbought"]] = False
     return df
 
 
@@ -92,7 +92,7 @@ def add_dmi(df, n=14):
     # 强趋势条件: ADX > 25 时金叉/死叉更可靠
     df["dmi_gc_strong"] = df["dmi_gc"] & (df["adx"] > 25)
     df["dmi_dc_strong"] = df["dmi_dc"] & (df["adx"] > 25)
-    df.loc[:30, ["dmi_gc", "dmi_dc", "dmi_gc_strong", "dmi_dc_strong"]] = False
+    df.loc[df.index[:31], ["dmi_gc", "dmi_dc", "dmi_gc_strong", "dmi_dc_strong"]] = False
     return df
 
 

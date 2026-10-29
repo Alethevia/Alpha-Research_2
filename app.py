@@ -3,7 +3,7 @@
 Stock Indicator Historical Frequency Viewer (Chinese UI + English Terms)
 ============================================================================
 三个模式:
-1. 单股分析 - 输入代码, 查看当前触发的信号 + 21年历史频率
+1. 单股分析 - 输入代码, 查看当前触发的信号 + 技术信号目录
 2. 多周期共振 - 日/周/月 三个时间框架的 MACD/MA 状态
 3. 股票池扫描 - 一次扫描多只股票
 
@@ -1255,40 +1255,10 @@ with tab1:
                 # === 当前触发的信号 ===
                 st.markdown("---")
                 st.markdown("## 🎯 当前触发的技术信号")
-                st.caption(
-                    "每个信号显示其 21 年历史频率、近 6 年频率、以及频率稳定性描述。"
-                    "**历史频率不是预测**。"
-                )
-
-                # 'detected' was computed above (before the AI section) and already sorted
+                st.caption("只显示从当前输入行情计算的技术信号。旧历史频率缺少可复现数据与脚本，已撤下。")
                 if detected:
                     for sig_col in detected:
-                        stat = SIGNAL_STATS[sig_col]
-                        with st.container():
-                            st.markdown(f"### ✓ {zh_label(sig_col)}")
-                            st.markdown(f"**频率稳定性 (TRAIN/TEST)**: {stability_badge_zh(stat)}")
-
-                            col_l, col_r = st.columns([1, 2])
-                            with col_l:
-                                st.metric("历史触发次数", f"{stat['n']:,}")
-                                st.metric("21 年后 10 日上涨率",
-                                          f"{stat['pct_up_10d']:.1f}%",
-                                          f"基准 {BASELINE_10D['pct_up_10d']:.1f}%",
-                                          delta_color="off")
-                                test_pct = stat.get("test_pct_up_10d", stat['pct_up_10d'])
-                                delta_recent = test_pct - stat['pct_up_10d']
-                                st.metric("近 6 年后 10 日上涨率",
-                                          f"{test_pct:.1f}%",
-                                          f"{delta_recent:+.1f}% vs 21年",
-                                          delta_color="inverse")
-                            with col_r:
-                                sig_full = "✓ 统计显著" if stat["significant"] else "✗ 不显著"
-                                sig_oos = "✓ 近 6 年仍显著" if stat.get("oos_significant") else "✗ 近 6 年不显著"
-                                st.write(f"**21 年统计显著性**: {sig_full} (p = {stat['p_value']:.3f})")
-                                st.write(f"**样本外验证 (2020-2026)**: {sig_oos}")
-                                if "note" in stat:
-                                    st.info(f"📝 备注: {stat['note']}")
-                            st.markdown("---")
+                        st.markdown(f"### ✓ {zh_label(sig_col)}")
                 else:
                     st.info("该股票今日无主要信号触发。")
 
@@ -1386,26 +1356,10 @@ with tab1:
 
                 # === 参考表 ===
                 st.markdown("---")
-                st.markdown(f"## 📚 完整参考表: 全部 {len(SIGNAL_STATS)} 个信号 (21 年回测验证)")
-                st.info(
-                    "**样本外验证**: 训练集 2005-2019 vs 测试集 2020-2026。"
-                    "平均频率漂移 = 2.15%。部分信号在测试期 p>=0.05。"
-                    "请用 '频率稳定性' 列查看每个信号在新旧数据间的漂移。"
-                )
-                ref_rows = []
-                for k, stat in SIGNAL_STATS.items():
-                    ref_rows.append({
-                        "信号 (Signal)": zh_label(k),
-                        "类别": stat["category"],
-                        "样本数 n": f"{stat['n']:,}",
-                        "21 年上涨率": f"{stat['pct_up_10d']:.1f}%",
-                        "近 6 年上涨率": f"{stat.get('test_pct_up_10d', 0):.1f}%",
-                        "Alpha": f"{stat['alpha_10d']:+.2f}%",
-                        "p 值": f"{stat['p_value']:.3f}",
-                        "频率稳定性": stability_badge_zh(stat),
-                    })
-                ref_df = pd.DataFrame(ref_rows)
-                st.dataframe(ref_df, use_container_width=True, hide_index=True, height=600)
+                st.markdown("## 技术信号目录")
+                st.info("历史上涨率、Alpha、p 值及样本外显著性未完成可复现验证，当前不显示。")
+                st.dataframe(pd.DataFrame([{"信号": zh_label(k), "类别": v["category"]}
+                                          for k, v in SIGNAL_STATS.items()]), hide_index=True)
 
 
 # ============== TAB 2: 多周期共振 ==============
@@ -1557,7 +1511,7 @@ with tab3:
                             stat = SIGNAL_STATS[sig_col]
                             triggered.append({
                                 "label_zh": zh_label(sig_col),
-                                "alpha": stat["alpha_10d"],
+                                "alpha": 0.0,
                                 "oos_significant": stat.get("oos_significant", False),
                             })
                 triggered.sort(key=lambda t: abs(t["alpha"]), reverse=True)
@@ -1568,7 +1522,7 @@ with tab3:
                     "MACD": "↑" if last.get("macd_state") == 1 else "↓" if last.get("macd_state") == -1 else "—",
                     "200日均线之上": "是" if last.get("above_sma200") else "否",
                     "ADX": f"{last['adx']:.1f}" if pd.notna(last.get("adx")) else "—",
-                    "触发的信号 (取前 5)": ", ".join(f"{t['label_zh']} ({t['alpha']:+.2f}% α)" for t in triggered[:5]) if triggered else "无",
+                    "触发的信号 (取前 5)": ", ".join(t['label_zh'] for t in triggered[:5]) if triggered else "无",
                     "n_signals": len(triggered),
                 })
             progress.empty()

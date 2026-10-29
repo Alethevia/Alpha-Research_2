@@ -169,16 +169,11 @@ def analyze(symbol: str,
                     sig_rows.append({
                         "信号": stat["label"],
                         "类别": stat["category"],
-                        "n": stat["n"],
-                        "21年上涨率%": round(stat["pct_up_10d"], 1),
-                        "近6年上涨率%": round(stat.get("test_pct_up_10d", stat["pct_up_10d"]), 1),
-                        "Alpha%": round(stat["alpha_10d"], 2),
-                        "p值": round(stat["p_value"], 3),
-                        "近6年仍显著": "✓" if stat.get("oos_significant") else "✗",
+                        "验证状态": "历史统计未验证，已撤下",
                     })
-        sig_rows.sort(key=lambda r: (r["近6年仍显著"] != "✓", -abs(r["Alpha%"])))
+        sig_rows.sort(key=lambda r: r["信号"])
         sig_df = pd.DataFrame(sig_rows) if sig_rows else pd.DataFrame(
-            columns=["信号", "类别", "n", "21年上涨率%", "近6年上涨率%", "Alpha%", "p值", "近6年仍显著"]
+            columns=["信号", "类别", "验证状态"]
         )
 
         # === Probability forecast ===
